@@ -11,6 +11,12 @@ _SECRET_KEY = re.compile(
     re.IGNORECASE,
 )
 _CONNECTION_USERINFO = re.compile(r"(?P<scheme>[a-z][a-z0-9+.-]*://)[^/@\s]+@", re.I)
+_INLINE_SECRET = re.compile(
+    r"(?P<key>password|passwd|token|secret|private[_-]?key|passphrase|credential)"
+    r"(?P<separator>[\"']?\s*[:=]\s*[\"']?)"
+    r"(?P<value>[^\s,}\"']+)",
+    re.IGNORECASE,
+)
 
 
 def is_secret_key(key: str) -> bool:
@@ -25,6 +31,13 @@ def redact(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        return _CONNECTION_USERINFO.sub(r"\g<scheme><redacted>@", value)
+        return redact_text(value)
     return value
 
+
+def redact_text(value: str) -> str:
+    value = _CONNECTION_USERINFO.sub(r"\g<scheme><redacted>@", value)
+    return _INLINE_SECRET.sub(
+        lambda match: f"{match.group('key')}{match.group('separator')}{REDACTED}",
+        value,
+    )

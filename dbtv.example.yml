@@ -2,20 +2,24 @@ version: 1
 
 project:
   dbt_executable: dbt
+  profile: null
   production_target: dev
   partial_parse: true
 
 source:
   connector: snowflake
+  credential_resolver: dbt_profile
   session:
     query_tag_prefix: dbtv
     statement_timeout_seconds: 900
     login_timeout_seconds: 60
     network_timeout_seconds: 300
+    timezone: UTC
   extraction:
     parallel_sources: 2
     arrow_batch_rows: 100000
     max_retries: 3
+    retry_base_seconds: 1
 
 local:
   backend: duckdb
@@ -24,28 +28,48 @@ local:
   threads: 4
   memory_limit: 8GB
   temp_directory: .dbtv/tmp
+  preserve_identifier_case: true
 
 cache:
   provider: parquet
   root: .dbtv/cache
   default_ttl: 24h
   compression: zstd
+  row_group_target_bytes: 134217728
   maximum_size: 100GB
+  retain_previous_snapshots: 2
+  integrity: metadata_and_sizes
 
 data_profiles:
   developer:
     default:
       strategy: limit
       limit: 100000
+    sources:
+      - select: source:reference.*
+        strategy: full
 
 default_data_profile: developer
 
 compatibility:
   mode: strict
   install_shims: true
+  allow_rules: []
+  warn_rules: []
+  deny_rules: []
 
 policy:
   allow_full_source: false
   max_rows_per_source: 5000000
   max_estimated_bytes_per_run: 20GB
+  require_explicit_where_for_tags: []
+  deny_source_tags: []
+  max_cache_age_for_tags: {}
+  require_fidelity: null
+  cache_file_mode: "0600"
+  cache_directory_mode: "0700"
 
+reporting:
+  show_query_text: false
+  show_relation_names: true
+  telemetry: disabled

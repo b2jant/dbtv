@@ -44,15 +44,67 @@ class ManifestError(DbtvError):
 
 class OfflineViolation(DbtvError):
     def __init__(self, message: str) -> None:
-        super().__init__(message, "DBTV-OFFLINE-001", 4)
+        super().__init__(message, "DBTV-OFFLINE-001", 7)
 
 
-class NotImplementedMilestone(DbtvError):
-    def __init__(self, capability: str) -> None:
-        super().__init__(
-            f"{capability} is not implemented in the current milestone.",
-            "DBTV-MILESTONE-001",
-            2,
-            "Use `dbtv plan` to validate the project while the first execution slice is built.",
-        )
+class CredentialError(DbtvError):
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message, "DBTV-CREDENTIAL-001", 4, hint)
 
+
+class SourceConnectionError(DbtvError):
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message, "DBTV-SOURCE-CONNECTION-001", 4, hint)
+
+
+class ExtractionError(DbtvError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, "DBTV-EXTRACTION-001", 5, hint, context or {})
+
+
+class PolicyError(DbtvError):
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message, "DBTV-POLICY-001", 6, hint)
+
+
+class CacheError(DbtvError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, "DBTV-CACHE-001", 7, hint, context or {})
+
+
+class LockError(DbtvError):
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message, "DBTV-LOCK-001", 7, hint)
+
+
+class BindingError(DbtvError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, "DBTV-BINDING-001", 8, hint, context or {})
+
+
+class CompatibilityError(DbtvError):
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message, "DBTV-COMPAT-001", 9, hint)
+
+
+class CancellationError(DbtvError):
+    def __init__(self, message: str = "Operation cancelled by the user.") -> None:
+        super().__init__(message, "DBTV-CANCELLED-001", 130)

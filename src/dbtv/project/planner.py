@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import shutil
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
+from dbtv.compatibility import CompatibilityAnalyzer
 from dbtv.config.schema import DbtvConfig
 from dbtv.core.errors import ManifestError
 from dbtv.core.hashing import sha256_value
@@ -15,6 +18,7 @@ from dbtv.core.models import (
 )
 from dbtv.project.dbt_invoker import DbtInvoker
 from dbtv.project.discovery import DbtProject
+from dbtv.project.fingerprint import project_fingerprint
 from dbtv.project.manifest import load_manifest
 from dbtv.project.profile import LOCAL_TARGET_NAME, write_local_profile
 from dbtv.project.selection import parse_dbt_ls_json, upstream_sources
@@ -48,6 +52,8 @@ class ProjectPlanner:
             target=production_target,
             target_path=run.production_target_path,
             variables=variables,
+            log_path=run.root / "logs",
+            partial_parse=config.project.partial_parse,
         )
         production_selected = self._list(
             project=project,
@@ -56,6 +62,7 @@ class ProjectPlanner:
             select=select,
             exclude=exclude,
             variables=variables,
+            log_path=run.root / "logs",
         )
 
         write_local_profile(run.generated_profiles_dir, project, config)
@@ -65,6 +72,8 @@ class ProjectPlanner:
             target=LOCAL_TARGET_NAME,
             target_path=run.local_target_path,
             variables=variables,
+            log_path=run.root / "logs",
+            partial_parse=config.project.partial_parse,
         )
         local_selected = self._list(
             project=project,
@@ -73,6 +82,7 @@ class ProjectPlanner:
             select=select,
             exclude=exclude,
             variables=variables,
+            log_path=run.root / "logs",
         )
 
         production_sources = set(upstream_sources(production_manifest, production_selected))
@@ -80,6 +90,11 @@ class ProjectPlanner:
         required_sources = sorted(production_sources | local_sources)
         mappings: list[SourceMapping] = []
         findings: list[CompatibilityFinding] = []
+        findings.extend(
+            CompatibilityAnalyzer(config.compatibility).analyze_manifest(
+                local_manifest, local_selected
+            )
+        )
 
         if production_sources != local_sources:
             findings.append(
@@ -127,11 +142,16 @@ class ProjectPlanner:
                     source=source_ref,
                     production_relation=production_node.relation,
                     local_relation=local_node.relation,
+                    tags=production_node.tags,
+                    meta=production_node.meta,
                 )
             )
 
+        fingerprint = project_fingerprint(project.root)
+        self._cache_manifests(project.root, fingerprint, run)
         hash_payload = {
             "project": str(project.root),
+            "project_fingerprint": fingerprint,
             "production_target": production_target,
             "local_target": LOCAL_TARGET_NAME,
             "selected": production_selected,
@@ -153,7 +173,34 @@ class ProjectPlanner:
             findings=tuple(findings),
             production_manifest_schema=production_manifest.schema_url,
             local_manifest_schema=local_manifest.schema_url,
+            project_fingerprint=fingerprint,
             plan_hash=sha256_value(hash_payload),
+        )
+
+    @staticmethod
+    def _cache_manifests(
+        project_dir: Path,
+        fingerprint: str,
+        run: RunWorkspace,
+    ) -> None:
+        cache_dir = project_dir / ".dbtv" / "manifests" / fingerprint.split(":", 1)[1]
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        production = run.production_target_path / "manifest.json"
+        local = run.local_target_path / "manifest.json"
+        shutil.copy2(production, cache_dir / "production-manifest.json")
+        shutil.copy2(local, cache_dir / "local-manifest.json")
+        (cache_dir / "metadata.json").write_text(
+            json.dumps(
+                {
+                    "project_fingerprint": fingerprint,
+                    "production_manifest": "production-manifest.json",
+                    "local_manifest": "local-manifest.json",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
         )
 
     def _parse(
@@ -164,6 +211,8 @@ class ProjectPlanner:
         target: str,
         target_path: Path,
         variables: str | None,
+        log_path: Path,
+        partial_parse: bool,
     ) -> NormalizedManifest:
         args = [
             "parse",
@@ -178,7 +227,9 @@ class ProjectPlanner:
         ]
         if variables:
             args.extend(["--vars", variables])
-        self.invoker.run(args, cwd=project.root)
+        if not partial_parse:
+            args.append("--no-partial-parse")
+        self.invoker.run(args, cwd=project.root, env=_dbt_environment(log_path))
         return load_manifest(target_path / "manifest.json")
 
     def _list(
@@ -190,6 +241,7 @@ class ProjectPlanner:
         select: Sequence[str],
         exclude: Sequence[str],
         variables: str | None,
+        log_path: Path,
     ) -> tuple[str, ...]:
         args = [
             "ls",
@@ -210,5 +262,17 @@ class ProjectPlanner:
             args.extend(["--exclude", *exclude])
         if variables:
             args.extend(["--vars", variables])
-        result = self.invoker.run(args, cwd=project.root)
+        result = self.invoker.run(
+            args,
+            cwd=project.root,
+            env=_dbt_environment(log_path),
+        )
         return parse_dbt_ls_json(result.stdout)
+
+
+def _dbt_environment(log_path: Path) -> dict[str, str]:
+    log_path.mkdir(parents=True, exist_ok=True)
+    return {
+        "DBT_LOG_PATH": str(log_path),
+        "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
+    }

@@ -54,4 +54,3 @@ def test_discovers_upstream_sources() -> None:
     manifest = normalize_manifest(manifest_fixture())
     sources = upstream_sources(manifest, ["model.analytics.stg_orders"])
     assert sources == ("source.analytics.app.orders",)
-

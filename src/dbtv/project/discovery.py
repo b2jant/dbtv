@@ -58,4 +58,3 @@ def _profiles_dir(explicit: Path | None) -> Path:
     if env_path := os.getenv("DBT_PROFILES_DIR"):
         return Path(env_path).expanduser().resolve()
     return (Path.home() / ".dbt").resolve()
-

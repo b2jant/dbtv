@@ -25,3 +25,25 @@ def test_unknown_configuration_key_fails(tmp_path: Path) -> None:
     with pytest.raises(ConfigError):
         load_config(tmp_path)
 
+
+def test_secret_field_is_rejected_even_in_plugin_config(tmp_path: Path) -> None:
+    (tmp_path / "dbtv.yml").write_text(
+        "version: 1\nsource:\n  plugin:\n    password: canary-secret\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="forbidden"):
+        load_config(tmp_path)
+
+
+def test_invalid_sampling_rule_fails_at_load(tmp_path: Path) -> None:
+    (tmp_path / "dbtv.yml").write_text(
+        "version: 1\n"
+        "data_profiles:\n"
+        "  developer:\n"
+        "    default:\n"
+        "      strategy: where_limit\n"
+        "      limit: 10\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="requires where"):
+        load_config(tmp_path)

@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 snowflake = [
+  "dbt-snowflake>=1.9,<2",
   "pyarrow>=18,<24",
   "snowflake-connector-python>=3.12,<5",
 ]
@@ -38,6 +39,9 @@ dbtv = "dbtv.cli.app:main"
 
 [project.entry-points."dbtv.source_connectors"]
 snowflake = "dbtv.connectors.snowflake:SnowflakeConnectorFactory"
+
+[project.entry-points."dbtv.credential_resolvers"]
+dbt_profile = "dbtv.credentials:DbtProfileCredentialResolverFactory"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dbtv"]

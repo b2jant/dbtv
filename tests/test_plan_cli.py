@@ -141,5 +141,25 @@ def test_plan_maps_production_and_local_sources_by_unique_id(tmp_path: Path) -> 
                 "identifier": "ORDERS",
                 "quoting": {},
             },
+            "tags": [],
+            "meta": {},
         }
     ]
+    assert plan["remote_estimates_requested"] is False
+    assert plan["remote_estimate_query_count"] == 0
+
+    offline_estimate = CliRunner().invoke(
+        main,
+        [
+            "--project-dir",
+            str(project),
+            "--profiles-dir",
+            str(profiles),
+            "plan",
+            "--source-mode",
+            "offline",
+            "--remote-estimates",
+        ],
+    )
+    assert offline_estimate.exit_code == 7
+    assert "forbidden in offline mode" in offline_estimate.output

@@ -528,6 +528,7 @@ The following contracts describe architecture, not exact final syntax. They shou
 from dataclasses import dataclass
 from typing import Mapping
 
+
 @dataclass(frozen=True)
 class SourceRef:
     unique_id: str
@@ -535,12 +536,14 @@ class SourceRef:
     source_name: str
     table_name: str
 
+
 @dataclass(frozen=True)
 class RemoteRelation:
     catalog: str | None
     schema: str
     identifier: str
     quoting: Mapping[str, bool]
+
 
 @dataclass(frozen=True)
 class LocalRelation:
@@ -1774,11 +1777,15 @@ Canonical key inputs:
   "sampling": {"strategy": "limit", "limit": 100000},
   "type_policy_version": 1,
   "fidelity": "strict",
-  "schema_fingerprint": "sha256:..."
+  "schema_fingerprint": "sha256:...",
+  "content_fingerprint": "sha256:..."
 }
 ```
 
 Serialize with sorted keys, normalized numbers and timestamps, and UTF-8; hash with SHA-256.
+The content fingerprint keeps refreshes immutable and distinct even when a provider
+cannot expose a reliable upstream source version; identical refreshed content may reuse
+the existing content-addressed snapshot.
 
 TTL and local path are not identity inputs.
 

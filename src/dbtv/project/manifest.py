@@ -72,6 +72,9 @@ def _normalize_node(unique_id: str, raw: Mapping[str, Any]) -> NormalizedNode:
         relation=relation,
         config=dict(_mapping(raw.get("config"))),
         source_name=_optional_string(raw.get("source_name")),
+        raw_code=_optional_string(raw.get("raw_code") or raw.get("raw_sql")),
+        tags=tuple(str(item) for item in (raw.get("tags") or [])),
+        meta=dict(_mapping(raw.get("meta"))),
     )
 
 
