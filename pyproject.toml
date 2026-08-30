@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dbtv"
+version = "0.1.0a0"
+description = "Local dbt acceleration with source snapshots and DuckDB"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "click>=8.1,<9",
+  "platformdirs>=4.3,<5",
+  "pydantic>=2.9,<3",
+  "PyYAML>=6.0,<7",
+  "rich>=13.9,<15",
+]
+
+[project.optional-dependencies]
+snowflake = [
+  "pyarrow>=18,<24",
+  "snowflake-connector-python>=3.12,<5",
+]
+duckdb = [
+  "duckdb>=1.2,<2",
+  "dbt-duckdb>=1.9,<2",
+]
+dev = [
+  "mypy>=1.13,<2",
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.8,<1",
+  "types-PyYAML>=6.0,<7",
+]
+
+[project.scripts]
+dbtv = "dbtv.cli.app:main"
+
+[project.entry-points."dbtv.source_connectors"]
+snowflake = "dbtv.connectors.snowflake:SnowflakeConnectorFactory"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dbtv"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["dbtv"]
