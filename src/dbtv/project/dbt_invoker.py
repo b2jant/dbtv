@@ -5,6 +5,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -34,6 +35,16 @@ class DbtInvoker:
                 return str(path)
         if resolved := shutil.which(self.executable):
             return resolved
+        if os.path.sep not in self.executable:
+            sibling_name = self.executable
+            if os.name == "nt" and not Path(sibling_name).suffix:
+                sibling_name += ".exe"
+            # Do not resolve the interpreter symlink: virtual environments commonly
+            # point it at a shared base interpreter while keeping scripts beside the
+            # unresolved environment path.
+            sibling = Path(sys.executable).parent / sibling_name
+            if sibling.is_file() and os.access(sibling, os.X_OK):
+                return str(sibling)
         raise DbtInvocationError(
             f"dbt executable {self.executable!r} was not found.",
             hint=(

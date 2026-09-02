@@ -29,25 +29,32 @@ local path.
 - source-tag policy controls, compatibility findings, redacted events, and diagnostics;
 - read-only inspection and guarded cleanup.
 
-## Install with UV
+## Install the CLI
 
 Python 3.12 is the recommended runtime.
 
 ```bash
-uv sync --extra snowflake --extra duckdb
-uv run dbtv version
+uv tool install \
+  'dbtv[snowflake,duckdb] @ git+https://github.com/b2jant/dbtv.git'
+dbtv version
 ```
+
+After installation, run `dbtv` directly from any dbt project. Upgrade later with
+`uv tool upgrade dbtv`.
 
 For repository development:
 
 ```bash
+git clone https://github.com/b2jant/dbtv.git
+cd dbtv
 uv sync --all-extras
 uv run pytest
 uv run ruff check .
 uv run mypy src/dbtv
 ```
 
-No global Python installation or manually managed virtual environment is required.
+UV manages the CLI's isolated environment. No global Python installation or manually
+managed virtual environment is required.
 
 ## First run
 
@@ -55,10 +62,10 @@ Run from an existing dbt project that already has a working Snowflake target in
 `profiles.yml`:
 
 ```bash
-uv run dbtv --project-dir /path/to/project init --update-gitignore
-uv run dbtv --project-dir /path/to/project doctor
-uv run dbtv --project-dir /path/to/project plan --select stg_orders+
-uv run dbtv --project-dir /path/to/project run --select stg_orders+
+dbtv --project-dir /path/to/project init --update-gitignore
+dbtv --project-dir /path/to/project doctor
+dbtv --project-dir /path/to/project plan --select stg_orders+
+dbtv --project-dir /path/to/project run --select stg_orders+
 ```
 
 Planning is local-only by default. Use `plan --remote-estimates` only when you explicitly
@@ -67,7 +74,7 @@ want tagged source count queries before execution.
 Repeat without any source connector or credential resolution:
 
 ```bash
-uv run dbtv --project-dir /path/to/project run --select stg_orders+ --offline
+dbtv --project-dir /path/to/project run --select stg_orders+ --offline
 ```
 
 `dbtv` does not run Snowflake locally. Cold or refreshed runs connect to an actual

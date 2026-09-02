@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dbtv"
-version = "0.1.0a0"
+version = "0.1.0a1"
 description = "Local dbt acceleration with source snapshots and DuckDB"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -18,13 +18,15 @@ dependencies = [
 
 [project.optional-dependencies]
 snowflake = [
-  "dbt-snowflake>=1.9,<2",
+  "dbt-core>=1.11.6,<1.12",
+  "dbt-snowflake>=1.11.6,<1.12",
   "pyarrow>=18,<24",
   "snowflake-connector-python>=3.12,<5",
 ]
 duckdb = [
+  "dbt-core>=1.11.6,<1.12",
   "duckdb>=1.2,<2",
-  "dbt-duckdb>=1.9,<2",
+  "dbt-duckdb>=1.11,<1.12",
 ]
 dev = [
   "mypy>=1.13,<2",

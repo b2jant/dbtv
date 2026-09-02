@@ -56,6 +56,22 @@ def test_dbt_child_process_is_terminated_on_cancellation(tmp_path: Path) -> None
         timer.cancel()
 
 
+def test_dbt_invoker_finds_executable_beside_runtime_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python = bin_dir / "python"
+    python.touch()
+    executable = bin_dir / "dbt"
+    executable.touch()
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(sys, "executable", str(python))
+
+    assert DbtInvoker().resolved_executable() == str(executable)
+
+
 def test_offline_registry_cannot_instantiate_even_an_installed_factory() -> None:
     class Factory:
         def capabilities(self) -> object:

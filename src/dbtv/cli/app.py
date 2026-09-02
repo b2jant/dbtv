@@ -152,7 +152,7 @@ def version_command(context: CliContext) -> None:
         "dbtv": __version__,
         "python": platform.python_version(),
         "platform": platform.platform(),
-        "dbt_executable": shutil.which("dbt"),
+        "dbt_executable": _resolved_dbt_executable(),
         "dbt_core": _installed_version("dbt-core"),
         "dbt_duckdb": _installed_version("dbt-duckdb"),
         "duckdb": _installed_version("duckdb"),
@@ -882,6 +882,13 @@ def _installed_version(distribution: str) -> str | None:
     try:
         return package_version(distribution)
     except PackageNotFoundError:
+        return None
+
+
+def _resolved_dbt_executable() -> str | None:
+    try:
+        return DbtInvoker().resolved_executable()
+    except DbtvError:
         return None
 
 

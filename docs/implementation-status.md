@@ -38,5 +38,5 @@ repository code alone:
 - conduct the controlled 5–10 developer pilot and retain normal remote production
   validation.
 
-Until those gates are complete, `0.1.0a0` accurately labels this as a pilot-ready alpha,
+Until those gates are complete, `0.1.0a1` accurately labels this as a pilot-ready alpha,
 not a production-validated company release.
