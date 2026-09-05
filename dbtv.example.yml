@@ -5,6 +5,7 @@ project:
   profile: null
   production_target: dev
   partial_parse: true
+  cache_parsing: true
 
 source:
   connector: snowflake
@@ -27,6 +28,8 @@ local:
   schema: dbtv_dev
   threads: 4
   memory_limit: 8GB
+  max_temp_directory_size: 20GB
+  inspect_max_rows: 1000
   temp_directory: .dbtv/tmp
   preserve_identifier_case: true
 
@@ -62,6 +65,9 @@ policy:
   allow_full_source: false
   max_rows_per_source: 5000000
   max_estimated_bytes_per_run: 20GB
+  max_extracted_bytes_per_run: 20GB
+  max_workspace_bytes: 150GB
+  minimum_free_disk: 1GB
   require_explicit_where_for_tags: []
   deny_source_tags: []
   max_cache_age_for_tags: {}

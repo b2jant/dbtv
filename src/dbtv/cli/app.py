@@ -7,7 +7,7 @@ import shutil
 import signal
 import sys
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import wraps
 from importlib.metadata import PackageNotFoundError
@@ -38,7 +38,8 @@ from dbtv.core.errors import (
     PolicyError,
     ProjectError,
 )
-from dbtv.core.models import FidelityMode, SnapshotRequest, SourceMode
+from dbtv.core.locks import FileLock
+from dbtv.core.models import FidelityMode, SourceMode
 from dbtv.core.units import parse_duration, parse_size
 from dbtv.credentials.registry import CredentialResolverRegistry
 from dbtv.diagnostics import create_diagnostics_bundle
@@ -46,8 +47,8 @@ from dbtv.orchestration import CommandOptions, Orchestrator
 from dbtv.project.dbt_invoker import DbtInvoker
 from dbtv.project.discovery import discover_project
 from dbtv.project.planner import ProjectPlanner
-from dbtv.snapshot.policy import LocalPolicyEngine, apply_max_rows, resolve_sampling
-from dbtv.snapshot.store import ParquetSnapshotStore
+from dbtv.snapshot.store import ParquetSnapshotStore, _snapshot_from_metadata
+from dbtv.sources import prepare_sources
 from dbtv.state import StateIndex
 from dbtv.workspace import Workspace
 
@@ -306,7 +307,7 @@ def doctor_command(context: CliContext) -> None:
                 "detail": config.source.connector,
             }
         )
-        if config.project.production_target:
+        if config.project.production_target and config.source.credential_resolver != "none":
             try:
                 CredentialResolverRegistry().create(config.source.credential_resolver).resolve(
                     profiles_dir=project.profiles_dir,
@@ -329,6 +330,38 @@ def doctor_command(context: CliContext) -> None:
                         "status": "error",
                         "detail": error.message,
                     }
+                )
+        for name, settings in config.connections.items():
+            try:
+                for distribution in connector_registry.dependencies(settings.connector):
+                    installed = _installed_version(distribution)
+                    checks.append(
+                        {
+                            "name": f"{name}: {distribution}",
+                            "status": "ok" if installed else "error",
+                            "detail": installed or "not installed",
+                        }
+                    )
+                if settings.credential_resolver != "none":
+                    CredentialResolverRegistry().create(settings.credential_resolver).resolve(
+                        profiles_dir=project.profiles_dir,
+                        profile_name=settings.profile
+                        or config.project.profile
+                        or project.profile_name,
+                        target_name=settings.target or config.project.production_target or "",
+                        env=os.environ,
+                        interactive=not context.non_interactive,
+                    )
+                checks.append(
+                    {
+                        "name": f"connection {name}",
+                        "status": "ok",
+                        "detail": "connector available; no connection attempted",
+                    }
+                )
+            except DbtvError as error:
+                checks.append(
+                    {"name": f"connection {name}", "status": "error", "detail": error.message}
                 )
         free_bytes = shutil.disk_usage(project.root).free
         checks.append(
@@ -361,6 +394,7 @@ def doctor_command(context: CliContext) -> None:
 @click.option("--max-bytes", default=None)
 @click.option("--allow-full-source", is_flag=True)
 @click.option("--snapshot-id", default=None)
+@click.option("--dataset", "dataset_id", default=None)
 @click.option(
     "--remote-estimates",
     is_flag=True,
@@ -385,13 +419,14 @@ def plan_command(
     max_bytes: str | None,
     allow_full_source: bool,
     snapshot_id: str | None,
+    dataset_id: str | None,
     remote_estimates: bool,
     fidelity: str | None,
 ) -> None:
     """Resolve the production/local graph and required source mappings."""
     project = discover_project(context.project_dir, profiles_dir=context.profiles_dir)
     config = _load_context_config(context, project.root)
-    if remote_estimates and source_mode == SourceMode.OFFLINE.value:
+    if remote_estimates and (source_mode == SourceMode.OFFLINE.value or dataset_id):
         raise OfflineViolation("Remote estimates are forbidden in offline mode.")
     workspace = Workspace(project.root)
     run = workspace.create_run(context.invocation_id)
@@ -406,112 +441,83 @@ def plan_command(
     )
     state = StateIndex(workspace.state_path, workspace.locks)
     state.initialize(run.invocation_id)
-    ttl = parse_duration(cache_ttl or config.cache.default_ttl)
-    for mapping in plan.source_mappings:
-        for tag in mapping.tags:
-            if tag in config.policy.max_cache_age_for_tags:
-                ttl = min(ttl, parse_duration(config.policy.max_cache_age_for_tags[tag]))
-    store = ParquetSnapshotStore(
-        config.cache.root,
+    preparation = prepare_sources(
+        project=project,
+        config=config,
+        workspace=workspace,
         state=state,
-        locks_dir=workspace.locks,
-        ttl=ttl,
-        compression=config.cache.compression,
-        row_group_target_bytes=config.cache.row_group_target_bytes,
-        integrity=config.cache.integrity,
-        maximum_size=min(
-            parse_size(config.cache.maximum_size),
-            parse_size(max_bytes) if max_bytes else 2**63 - 1,
-        ),
-        retain_previous=config.cache.retain_previous_snapshots,
-        file_mode=int(config.policy.cache_file_mode, 8),
-        directory_mode=int(config.policy.cache_directory_mode, 8),
-    )
-    profile_name = data_profile or config.default_data_profile
-    if profile_name not in config.data_profiles:
-        raise ConfigError(f"Unknown data profile {profile_name!r}.")
-    selected_profile = config.data_profiles[profile_name]
-    selected_fidelity = FidelityMode(fidelity or config.compatibility.mode)
-    policy = LocalPolicyEngine(config.policy, allow_full_source=allow_full_source)
-    source_decisions: list[dict[str, Any]] = []
-    requests: list[SnapshotRequest] = []
-    for mapping in plan.source_mappings:
-        sampling = apply_max_rows(resolve_sampling(selected_profile, mapping.source), max_rows)
-        policy.evaluate_sampling(
-            mapping.source,
-            sampling,
-            tags=mapping.tags,
-            fidelity=selected_fidelity,
-        )
-        request = SnapshotRequest(
-            mapping.source,
-            mapping.production_relation,
-            sampling,
-            selected_fidelity,
-            query_tag=(
-                f"{config.source.session.query_tag_prefix}/plan/"
-                f"{run.invocation_id}/{mapping.source.unique_id}"
-            )[:256],
-        )
-        requests.append(request)
-        decision = store.decide(
-            request,
-            provider=config.source.connector,
-            mode=source_mode,
+        plan=plan,
+        options=CommandOptions(
+            command="plan",
+            select=select_,
+            exclude=exclude,
+            variables=variables,
+            source_mode=SourceMode(source_mode),
+            data_profile=data_profile,
+            cache_ttl=cache_ttl,
+            max_rows=max_rows,
+            max_bytes=max_bytes,
+            allow_full_source=allow_full_source,
             snapshot_id=snapshot_id,
-        )
-        source_decisions.append(
-            {
-                "source_unique_id": mapping.source.unique_id,
-                "action": decision.action.value,
-                "reason": decision.reason,
-                "sampling": asdict(sampling),
-                "snapshot_key": (decision.snapshot.snapshot_key if decision.snapshot else None),
-            }
-        )
+            dataset_id=dataset_id,
+            fidelity=FidelityMode(fidelity) if fidelity else None,
+        ),
+    )
+    source_decisions = [source.to_dict() for source in preparation.sources]
     remote_estimate_queries = 0
-    if remote_estimates and requests:
-        credentials = (
-            CredentialResolverRegistry()
-            .create(config.source.credential_resolver)
-            .resolve(
-                profiles_dir=project.profiles_dir,
-                profile_name=config.project.profile or project.profile_name,
-                target_name=plan.production_target,
-                env=os.environ,
-                interactive=not context.non_interactive,
-            )
-        )
-        connector = ConnectorRegistry().create(
-            config.source.connector,
-            credentials=credentials,
-            session=config.source.session,
-            extraction=config.source.extraction,
-            plugin_config=config.source.plugin,
-        )
+    if remote_estimates:
+        registry = ConnectorRegistry()
         estimated_bytes = 0
-        try:
-            connector.open()
-            for request, decision_payload in zip(requests, source_decisions, strict=True):
-                estimate = connector.estimate(request)
-                remote_estimate_queries += 1
-                decision_payload["estimated_rows"] = estimate.row_count if estimate else None
-                decision_payload["estimated_bytes"] = estimate.byte_count if estimate else None
+        for source, payload in zip(preparation.sources, source_decisions, strict=True):
+            if source.cohort_parent and not source.cohort_ready:
+                payload["estimate_unavailable"] = "Cohort parent requires capture first"
+                continue
+            settings = source.settings
+            credentials = None
+            if settings.credential_resolver != "none":
+                credentials = (
+                    CredentialResolverRegistry()
+                    .create(
+                        settings.credential_resolver,
+                    )
+                    .resolve(
+                        profiles_dir=project.profiles_dir,
+                        profile_name=settings.profile
+                        or config.project.profile
+                        or project.profile_name,
+                        target_name=settings.target or plan.production_target,
+                        env=os.environ,
+                        interactive=not context.non_interactive,
+                    )
+                )
+            connector = registry.create(
+                settings.connector,
+                credentials=credentials,
+                session=settings.session,
+                extraction=settings.extraction,
+                plugin_config=settings.plugin,
+            )
+            try:
+                connector.open()
+                estimate = connector.estimate(source.decision.request)
+                remote_estimate_queries += int(
+                    registry.capabilities(settings.connector).remote_access
+                )
+                payload["estimated_rows"] = estimate.row_count if estimate else None
+                payload["estimated_bytes"] = estimate.byte_count if estimate else None
                 if estimate and estimate.byte_count is not None:
                     estimated_bytes += estimate.byte_count
-        finally:
-            connector.close()
+            finally:
+                connector.close()
         if estimated_bytes > parse_size(config.policy.max_estimated_bytes_per_run):
-            raise PolicyError(
-                "Estimated source data exceeds the configured per-run policy limit.",
-                hint="Choose a smaller data profile or update the approved policy limit.",
-            )
+            raise PolicyError("Estimated source data exceeds the configured per-run policy limit.")
     artifact = plan.to_dict()
     artifact["source_decisions"] = source_decisions
     artifact["remote_estimates_requested"] = remote_estimates
     artifact["remote_estimate_query_count"] = remote_estimate_queries
     artifact["remote_access_on_execution"] = any(
-        item["action"] == "refresh" for item in source_decisions
+        item["action"] == "refresh" and not item.get("local_input", False)
+        for item in source_decisions
     )
     workspace.write_json(run.plan_path, artifact)
     render_plan(plan, output=context.output, source_decisions=source_decisions)
@@ -546,19 +552,25 @@ def status_command(context: CliContext, rebuild_index: bool) -> None:
     state.initialize("status")
     rebuild_report = None
     if rebuild_index:
-        rebuild_report = ParquetSnapshotStore(
-            config.cache.root,
-            state=state,
-            locks_dir=workspace.locks,
-            ttl=parse_duration(config.cache.default_ttl),
-            compression=config.cache.compression,
-            row_group_target_bytes=config.cache.row_group_target_bytes,
-            integrity=config.cache.integrity,
-            maximum_size=parse_size(config.cache.maximum_size),
-            retain_previous=config.cache.retain_previous_snapshots,
-            file_mode=int(config.policy.cache_file_mode, 8),
-            directory_mode=int(config.policy.cache_directory_mode, 8),
-        ).rebuild_index()
+        with FileLock(
+            workspace.locks / "workspace-use.lock",
+            invocation_id="rebuild",
+            command="rebuild",
+            timeout_seconds=0,
+        ):
+            rebuild_report = ParquetSnapshotStore(
+                config.cache.root,
+                state=state,
+                locks_dir=workspace.locks,
+                ttl=parse_duration(config.cache.default_ttl),
+                compression=config.cache.compression,
+                row_group_target_bytes=config.cache.row_group_target_bytes,
+                integrity=config.cache.integrity,
+                maximum_size=parse_size(config.cache.maximum_size),
+                retain_previous=config.cache.retain_previous_snapshots,
+                file_mode=int(config.policy.cache_file_mode, 8),
+                directory_mode=int(config.policy.cache_directory_mode, 8),
+            ).rebuild_index()
     snapshots = state.list_snapshots()
     payload = {
         "workspace": str(workspace.root),
@@ -612,6 +624,9 @@ def _execution_options(function: Callable[..., Any]) -> Callable[..., Any]:
         click.option("--max-bytes", default=None),
         click.option("--allow-full-source", is_flag=True),
         click.option("--snapshot-id", default=None),
+        click.option(
+            "--dataset", "dataset_id", default=None, help="Use an immutable dataset offline."
+        ),
         click.option("--keep-snapshot", is_flag=True),
         click.option(
             "--fidelity",
@@ -619,6 +634,9 @@ def _execution_options(function: Callable[..., Any]) -> Callable[..., Any]:
             default=None,
         ),
         click.option("--full-refresh", is_flag=True),
+        click.option(
+            "--capture-results", is_flag=True, help="Freeze outputs for exact comparison."
+        ),
     ]
     decorated = function
     for option in reversed(options):
@@ -645,6 +663,8 @@ def _execution_command(name: str) -> Callable[..., None]:
         keep_snapshot: bool,
         fidelity: str | None,
         full_refresh: bool,
+        dataset_id: str | None,
+        capture_results: bool,
     ) -> None:
         project = discover_project(context.project_dir, profiles_dir=context.profiles_dir)
         config = _load_context_config(context, project.root)
@@ -665,6 +685,8 @@ def _execution_command(name: str) -> Callable[..., None]:
                 run=run,
                 options=CommandOptions(
                     command=name,
+                    dataset_id=dataset_id,
+                    capture_results=capture_results,
                     select=select_,
                     exclude=exclude,
                     variables=variables,
@@ -717,7 +739,9 @@ def inspect_command(context: CliContext, query: str) -> None:
             hint="Complete `dbtv run` or `dbtv build` first.",
         )
     columns, rows = DuckDbExecutionBackend(config.local.database, Workspace(project.root)).inspect(
-        query
+        query,
+        max_rows=config.local.inspect_max_rows,
+        allowed_paths=_inspection_paths(workspace=Workspace(project.root)),
     )
     render_rows(columns, rows, output=context.output)
 
@@ -749,83 +773,94 @@ def clean_command(
     config = _load_context_config(context, project.root)
     workspace = Workspace(project.root)
     workspace.ensure()
-    cutoff = datetime.now(UTC) - parse_duration(older_than) if older_than else None
-    state = StateIndex(workspace.state_path, workspace.locks)
-    state.initialize("clean")
-    targets: list[tuple[str, Path, str | None]] = []
-    if snapshots or clean_all:
-        for record in state.list_snapshots():
-            created = datetime.fromisoformat(record.created_at)
-            if cutoff and created >= cutoff:
-                continue
-            if not clean_all and (record.active or record.pinned):
-                continue
-            targets.append(("snapshot", record.metadata_path.parent, record.snapshot_key))
-        pending_root = config.cache.root / "tmp"
-        if pending_root.exists():
-            for path in pending_root.iterdir():
+    with FileLock(
+        workspace.locks / "workspace-use.lock",
+        invocation_id="clean",
+        command="clean",
+        timeout_seconds=0,
+    ):
+        cutoff = datetime.now(UTC) - parse_duration(older_than) if older_than else None
+        state = StateIndex(workspace.state_path, workspace.locks)
+        state.initialize("clean")
+        targets: list[tuple[str, Path, str | None]] = []
+        if snapshots or clean_all:
+            referenced = state.dataset_references()
+            for record in state.list_snapshots():
+                created = datetime.fromisoformat(record.created_at)
+                if cutoff and created >= cutoff:
+                    continue
+                if not clean_all and (
+                    record.active or record.pinned or record.snapshot_key in referenced
+                ):
+                    continue
+                targets.append(("snapshot", record.metadata_path.parent, record.snapshot_key))
+            pending_root = config.cache.root / "tmp"
+            if pending_root.exists():
+                for path in pending_root.iterdir():
+                    modified = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+                    if cutoff and modified >= cutoff:
+                        continue
+                    targets.append(("pending snapshot", path, None))
+        if clean_runs or clean_all:
+            paths = workspace.runs.iterdir() if workspace.runs.exists() else ()
+            for path in paths:
+                if not path.is_dir() or path.is_symlink():
+                    continue
                 modified = datetime.fromtimestamp(path.stat().st_mtime, UTC)
                 if cutoff and modified >= cutoff:
                     continue
-                targets.append(("pending snapshot", path, None))
-    if clean_runs or clean_all:
-        paths = workspace.runs.iterdir() if workspace.runs.exists() else ()
-        for path in paths:
-            if not path.is_dir() or path.is_symlink():
-                continue
-            modified = datetime.fromtimestamp(path.stat().st_mtime, UTC)
-            if cutoff and modified >= cutoff:
-                continue
-            targets.append(("run", path, None))
-    if local_database or clean_all:
-        for path in (config.local.database, Path(f"{config.local.database}.wal")):
-            if path.exists():
-                targets.append(("local database", path, None))
-    if clean_all:
-        if config.cache.root.exists():
-            for path in config.cache.root.iterdir():
-                targets.append(("snapshot cache", path, None))
-        for directory, kind in (
-            (workspace.catalogs, "catalog"),
-            (workspace.generated, "generated"),
-            (workspace.tmp, "temporary"),
-            (workspace.manifests, "manifest cache"),
-            (workspace.root / "diagnostics", "diagnostics"),
-        ):
-            if directory.exists():
-                for path in directory.iterdir():
-                    targets.append((kind, path, None))
-        for path in (
-            workspace.state_path,
-            Path(f"{workspace.state_path}-wal"),
-            Path(f"{workspace.state_path}-shm"),
-        ):
-            if path.exists():
-                targets.append(("state index", path, None))
-    payload = [{"kind": kind, "path": str(path)} for kind, path, _ in targets]
-    if context.output == "json":
-        click.echo(json.dumps({"preview": preview, "targets": payload}, sort_keys=True))
-    else:
-        if not targets:
-            click.echo("Nothing matches the requested cleanup.")
-        for item in payload:
-            click.echo(f"{item['kind']}: {item['path']}")
-    if preview or not targets:
-        return
-    if not yes:
-        if context.non_interactive:
-            raise ConfigError("Cleanup requires --yes in non-interactive mode.")
-        click.confirm("Remove exactly these local artifacts?", abort=True)
-    for kind, path, snapshot_key in targets:
-        _validate_clean_target(path, workspace, config.local.database, config.cache.root)
-        if path.is_dir():
-            shutil.rmtree(path)
+                targets.append(("run", path, None))
+        if local_database or clean_all:
+            for path in (config.local.database, Path(f"{config.local.database}.wal")):
+                if path.exists():
+                    targets.append(("local database", path, None))
+        if clean_all:
+            if config.cache.root.exists():
+                for path in config.cache.root.iterdir():
+                    targets.append(("snapshot cache", path, None))
+            for directory, kind in (
+                (workspace.catalogs, "catalog"),
+                (workspace.generated, "generated"),
+                (workspace.tmp, "temporary"),
+                (workspace.manifests, "manifest cache"),
+                (workspace.root / "parsing", "parsing cache"),
+                (workspace.root / "datasets", "dataset"),
+                (workspace.root / "diagnostics", "diagnostics"),
+            ):
+                if directory.exists():
+                    for path in directory.iterdir():
+                        targets.append((kind, path, None))
+            for path in (
+                workspace.state_path,
+                Path(f"{workspace.state_path}-wal"),
+                Path(f"{workspace.state_path}-shm"),
+            ):
+                if path.exists():
+                    targets.append(("state index", path, None))
+        payload = [{"kind": kind, "path": str(path)} for kind, path, _ in targets]
+        if context.output == "json":
+            click.echo(json.dumps({"preview": preview, "targets": payload}, sort_keys=True))
         else:
-            path.unlink(missing_ok=True)
-        if kind == "snapshot" and snapshot_key:
-            state.delete_snapshot(snapshot_key)
-    if context.output == "console":
-        click.echo(f"Removed {len(targets)} artifact(s).")
+            if not targets:
+                click.echo("Nothing matches the requested cleanup.")
+            for item in payload:
+                click.echo(f"{item['kind']}: {item['path']}")
+        if preview or not targets:
+            return
+        if not yes:
+            if context.non_interactive:
+                raise ConfigError("Cleanup requires --yes in non-interactive mode.")
+            click.confirm("Remove exactly these local artifacts?", abort=True)
+        for kind, path, snapshot_key in targets:
+            _validate_clean_target(path, workspace, config.local.database, config.cache.root)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+            if kind == "snapshot" and snapshot_key:
+                state.delete_snapshot(snapshot_key)
+        if context.output == "console":
+            click.echo(f"Removed {len(targets)} artifact(s).")
 
 
 def _validate_clean_target(
@@ -920,3 +955,184 @@ def _consume_event(context: CliContext, payload: dict[str, Any]) -> None:
         and ranks.get(severity, 20) >= ranks[context.log_level]
     ):
         click.echo(line)
+
+
+def _inspection_paths(*, workspace: Workspace) -> tuple[Path, ...]:
+    state = StateIndex(workspace.state_path, workspace.locks)
+    state.initialize("inspect")
+    paths: list[Path] = []
+    for record in state.list_snapshots():
+        if record.state == "COMMITTED":
+            snapshot = _snapshot_from_metadata(
+                json.loads(record.metadata_path.read_text()),
+                record.metadata_path.parent,
+            )
+            paths.extend(snapshot.parquet_paths)
+    return tuple(paths)
+
+
+@main.group("datasets")
+def datasets_command() -> None:
+    """List or inspect immutable source datasets retained for replay."""
+
+
+@datasets_command.command("list")
+@click.pass_obj
+@guarded
+def datasets_list(context: CliContext) -> None:
+    project = discover_project(context.project_dir, profiles_dir=context.profiles_dir)
+    workspace = Workspace(project.root)
+    workspace.ensure()
+    state = StateIndex(workspace.state_path, workspace.locks)
+    state.initialize("datasets")
+    payload = [
+        {
+            "dataset_id": item["dataset_id"],
+            "active": item["active"],
+            "source_count": len(item["snapshots"]),
+            "created_by_run": item["created_by_run"],
+        }
+        for item in state.list_datasets()
+    ]
+    click.echo(json.dumps({"datasets": payload}, indent=2, sort_keys=True))
+
+
+@datasets_command.command("show")
+@click.argument("dataset_id")
+@click.pass_obj
+@guarded
+def dataset_show(context: CliContext, dataset_id: str) -> None:
+    project = discover_project(context.project_dir, profiles_dir=context.profiles_dir)
+    workspace = Workspace(project.root)
+    workspace.ensure()
+    state = StateIndex(workspace.state_path, workspace.locks)
+    state.initialize("datasets")
+    click.echo(json.dumps(state.get_dataset(dataset_id), indent=2, sort_keys=True))
+
+
+@datasets_command.command("drop")
+@click.argument("dataset_id")
+@click.option("--yes", is_flag=True, help="Release this dataset's retained snapshot references.")
+@click.pass_obj
+@guarded
+def dataset_drop(context: CliContext, dataset_id: str, yes: bool) -> None:
+    if not yes:
+        raise ConfigError("Dropping replay retention requires --yes.")
+    project = discover_project(context.project_dir, profiles_dir=context.profiles_dir)
+    workspace = Workspace(project.root)
+    workspace.ensure()
+    state = StateIndex(workspace.state_path, workspace.locks)
+    state.initialize("datasets")
+    with FileLock(
+        workspace.locks / "workspace-use.lock",
+        invocation_id="dataset-drop",
+        command="dataset-drop",
+        timeout_seconds=0,
+    ):
+        state.get_dataset(dataset_id)
+        state.delete_dataset(dataset_id)
+        (workspace.root / "datasets" / f"{dataset_id.split(':', 1)[1]}.json").unlink(
+            missing_ok=True
+        )
+        click.echo(json.dumps({"released_dataset": dataset_id}))
+
+
+@main.command("replay")
+@click.argument("run_id")
+@click.option("--allow-code-change", is_flag=True)
+@click.option("--full-refresh", is_flag=True)
+@click.pass_obj
+@guarded
+def replay_command(
+    context: CliContext, run_id: str, allow_code_change: bool, full_refresh: bool
+) -> None:
+    """Rebuild a recorded run on frozen sources in an isolated local database."""
+    from dbtv.validation import replay_run
+
+    project = discover_project(context.project_dir, profiles_dir=context.profiles_dir)
+    config = _load_context_config(context, project.root)
+    result = _cancellable(
+        lambda token: replay_run(
+            project=project,
+            config=config,
+            workspace=Workspace(project.root),
+            original_id=run_id,
+            allow_code_change=allow_code_change,
+            full_refresh=full_refresh,
+            cancellation=token,
+        )
+    )
+    render_summary(result.summary, output=context.output)
+    if result.summary.exit_code:
+        raise click.exceptions.Exit(result.summary.exit_code)
+
+
+@main.command("compare")
+@click.argument("left_run")
+@click.argument("right_run")
+@click.option("--allow-different-inputs", is_flag=True)
+@click.pass_obj
+@guarded
+def compare_command(
+    context: CliContext, left_run: str, right_run: str, allow_different_inputs: bool
+) -> None:
+    """Compare captured outputs with exact duplicate-aware SQL equality."""
+    from dbtv.validation import compare_runs
+
+    project = discover_project(context.project_dir, profiles_dir=context.profiles_dir)
+    config = _load_context_config(context, project.root)
+    workspace = Workspace(project.root)
+    result = _cancellable(
+        lambda token: compare_runs(
+            workspace,
+            left_run,
+            right_run,
+            config,
+            allow_different_inputs=allow_different_inputs,
+            token=token,
+        )
+    )
+    workspace.write_json(workspace.runs / right_run / "comparison.json", result)
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
+    if not result["equal"]:
+        raise click.exceptions.Exit(1)
+
+
+@main.command("validate-incremental")
+@click.option("--base-dataset", required=True)
+@click.option("--next-dataset", required=True)
+@click.option("--select", "select_", multiple=True)
+@click.pass_obj
+@guarded
+def incremental_command(
+    context: CliContext, base_dataset: str, next_dataset: str, select_: tuple[str, ...]
+) -> None:
+    """Compare a two-state incremental build with a fresh full-refresh reference."""
+    from dbtv.validation import validate_incremental
+
+    project = discover_project(context.project_dir, profiles_dir=context.profiles_dir)
+    config = _load_context_config(context, project.root)
+    result = _cancellable(
+        lambda token: validate_incremental(
+            project=project,
+            config=config,
+            workspace=Workspace(project.root),
+            base_dataset=base_dataset,
+            next_dataset=next_dataset,
+            select=select_,
+            cancellation=token,
+        )
+    )
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
+    if not result["equal"]:
+        raise click.exceptions.Exit(1)
+
+
+def _cancellable(operation: Callable[[CancellationToken], Any]) -> Any:
+    token = CancellationToken()
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, lambda *_: token.cancel())
+    try:
+        return operation(token)
+    finally:
+        signal.signal(signal.SIGINT, previous)

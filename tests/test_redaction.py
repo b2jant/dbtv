@@ -19,3 +19,22 @@ def test_inline_secret_redaction() -> None:
     assert "canary" not in text
     assert "other" not in text
     assert "key-material" not in text
+
+
+def test_structural_dbt_ids_remain_readable_without_exposing_credentials() -> None:
+    digest = "sha256:" + "a" * 64
+    result = redact(
+        {
+            "snapshots": {"source.app.tokens": digest},
+            "source_scopes": {"source.app.password_resets": digest},
+            "outputs": {
+                "model.app.tokens": {"checksum": digest, "password": "secret"},
+                "token": "real-token",
+            },
+        }
+    )
+    assert result["snapshots"]["source.app.tokens"] == digest
+    assert result["source_scopes"]["source.app.password_resets"] == digest
+    assert result["outputs"]["model.app.tokens"]["checksum"] == digest
+    assert result["outputs"]["model.app.tokens"]["password"] == REDACTED
+    assert result["outputs"]["token"] == REDACTED

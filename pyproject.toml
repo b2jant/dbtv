@@ -27,6 +27,7 @@ duckdb = [
   "dbt-core>=1.11.6,<1.12",
   "duckdb>=1.2,<2",
   "dbt-duckdb>=1.11,<1.12",
+  "pyarrow>=18,<24",
 ]
 dev = [
   "mypy>=1.13,<2",
@@ -41,6 +42,7 @@ dbtv = "dbtv.cli.app:main"
 
 [project.entry-points."dbtv.source_connectors"]
 snowflake = "dbtv.connectors.snowflake:SnowflakeConnectorFactory"
+parquet = "dbtv.connectors.parquet:ParquetConnectorFactory"
 
 [project.entry-points."dbtv.credential_resolvers"]
 dbt_profile = "dbtv.credentials:DbtProfileCredentialResolverFactory"

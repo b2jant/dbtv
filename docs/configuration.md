@@ -6,11 +6,12 @@ relative to the dbt project.
 
 The generated example is [`dbtv.example.yml`](../dbtv.example.yml). Important groups:
 
-- `project`: dbt executable, production profile/target, partial parsing;
-- `source`: connector, session timeouts, Arrow batch size, retries, concurrency;
-- `local`: DuckDB path, schema, threads, memory, and temp directory;
+- `project`: dbt executable, production profile/target, partial parsing and persistent parse reuse;
+- `source`: default connector, session timeouts, Arrow batch size, retries, concurrency;
+- `connections` / `routes`: named connector/resolver settings, source patterns, and projections;
+- `local`: DuckDB path, schema, threads, memory, spill limit, temp directory, and inspection row cap;
 - `cache`: root, TTL, compression, integrity, quota, and retention;
-- `data_profiles`: default and source-specific working-set rules;
+- `data_profiles`: default and source-specific working-set rules and explicit key cohorts;
 - `compatibility`: strict/warn/lossy behavior and explicit rule overrides;
 - `policy`: extraction caps, source-tag restrictions, file modes, and retention limits.
 
@@ -54,3 +55,15 @@ without changing orchestration.
 Supported core overrides include `DBTV_DBT_EXECUTABLE`, `DBTV_PRODUCTION_TARGET`,
 `DBTV_LOCAL_DATABASE`, `DBTV_CACHE_ROOT`, `DBTV_DEFAULT_DATA_PROFILE`,
 `DBTV_SOURCE_CONNECTOR`, and `DBTV_LOCAL_MEMORY_LIMIT`.
+
+
+See [local runtime workflows](local-runtime.md) for complete named-connection, Parquet,
+cohort, replay, and resource-policy examples. `credential_resolver: none` is the explicit
+choice for local Parquet inputs. `identity` provides public account/access context for
+custom resolvers; it is hashed into the snapshot request identity.
+
+`policy.max_extracted_bytes_per_run` caps uncompressed Arrow bytes across workers.
+`cache.maximum_size` caps stored snapshots. `policy.max_workspace_bytes` and
+`policy.minimum_free_disk` apply to the monitored local workspace, cache, output
+file, and spill roots. These cooperative checks complement `local.memory_limit`
+and `local.max_temp_directory_size`; they are not OS-level process or disk quotas.

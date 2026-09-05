@@ -21,3 +21,15 @@ MVP storage relies on company-approved full-disk encryption. If application-laye
 encryption is mandatory, it belongs at the snapshot-store boundary. Governance owners
 must approve allowed source tags, retention, device posture, and incident handling
 before a company pilot.
+
+
+Connection scopes hash public account, user, role, profile/target, configured identity,
+and plugin settings. They prevent unintended reuse across access contexts, but cached
+data is still local data that can outlive remote permission changes. Ordinary cleanup
+protects retained datasets. Explicit dataset release or full cleanup controls retention.
+
+Offline prevents DBTV from creating source connectors or resolving source credentials.
+The dbt project is trusted executable code; offline is not a network sandbox for arbitrary
+project macros, hooks, or third-party dbt packages. Diagnostic archives exclude source and
+captured-output Parquet, and omit predicates, vars, and invocation settings. Names, schemas,
+and error messages can still contain project-specific literals; review an archive before sharing it.

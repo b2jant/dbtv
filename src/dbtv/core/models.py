@@ -168,6 +168,7 @@ class SnapshotRequest:
     fidelity: FidelityMode
     projection: tuple[str, ...] | None = None
     query_tag: str | None = None
+    connection_scope: str = ""
 
     def identity_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -210,6 +211,8 @@ class DatasetSnapshot:
     query_tag: str | None = None
     provider_version: str | None = None
     pinned: bool = False
+    connection_scope: str = ""
+    verified_at: str | None = None
 
     @property
     def parquet_paths(self) -> tuple[Path, ...]:
@@ -301,6 +304,7 @@ class RunSummary:
     warnings: tuple[str, ...] = ()
     dbt_results: tuple[DbtNodeResult, ...] = ()
     state_transitions: tuple[Mapping[str, str], ...] = ()
+    dataset_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -343,6 +347,7 @@ class SourceCapabilities:
     consistent_snapshot_time: bool
     direct_duckdb_read: bool
     cancellable_queries: bool
+    remote_access: bool = True
 
 
 @runtime_checkable

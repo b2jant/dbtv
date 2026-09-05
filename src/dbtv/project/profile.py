@@ -30,6 +30,7 @@ def render_local_profile(
             "memory_limit": config.local.memory_limit,
             "temp_directory": str(config.local.temp_directory),
             "preserve_identifier_case": config.local.preserve_identifier_case,
+            "max_temp_directory_size": config.local.max_temp_directory_size,
         },
     }
     if attachments:

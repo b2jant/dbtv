@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from queue import Empty, LifoQueue
+from typing import Any
 
 from dbtv.backend.duckdb import DuckDbExecutionBackend
 from dbtv.compatibility import CompatibilityAnalyzer
@@ -20,27 +23,30 @@ from dbtv.core.models import (
     DatasetSnapshot,
     DbtNodeResult,
     ExecutionPlan,
+    ExtractionBatch,
     FidelityMode,
     RunSummary,
     SamplingSpec,
     SamplingStrategy,
     SnapshotAction,
-    SnapshotDecision,
-    SnapshotRequest,
     SourceBinding,
     SourceCapabilities,
     SourceMode,
 )
-from dbtv.core.units import parse_duration, parse_size
 from dbtv.credentials.registry import CredentialResolverRegistry
+from dbtv.datasets import commit_dataset
 from dbtv.project.artifacts import load_run_results
+from dbtv.project.boundaries import dependency_boundaries, lineage
 from dbtv.project.dbt_invoker import DbtInvoker
 from dbtv.project.discovery import DbtProject
+from dbtv.project.manifest import load_manifest
 from dbtv.project.planner import ProjectPlanner
 from dbtv.project.profile import LOCAL_TARGET_NAME, write_local_profile
-from dbtv.snapshot.policy import LocalPolicyEngine, apply_max_rows, resolve_sampling
+from dbtv.resources import RunBudget
 from dbtv.snapshot.store import ParquetSnapshotStore
+from dbtv.sources import PlannedSource, materialize_cohort, prepare_sources, source_levels
 from dbtv.state import StateIndex
+from dbtv.validation import capture_outputs, execution_context
 from dbtv.workspace import RunWorkspace, Workspace
 
 
@@ -61,6 +67,8 @@ class CommandOptions:
     fidelity: FidelityMode | None = None
     full_refresh: bool = False
     interactive: bool = True
+    dataset_id: str | None = None
+    capture_results: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,7 +103,37 @@ class Orchestrator:
         cancellation: CancellationToken | None = None,
         event_consumer: Callable[[RunEvent], None] | None = None,
     ) -> OrchestrationResult:
+        workspace.ensure()
+        with FileLock(
+            workspace.locks / "workspace-use.lock",
+            invocation_id=run.invocation_id,
+            command=options.command,
+            timeout_seconds=0,
+        ):
+            return self._execute(
+                project=project,
+                config=config,
+                workspace=workspace,
+                run=run,
+                options=options,
+                cancellation=cancellation,
+                event_consumer=event_consumer,
+            )
+
+    def _execute(
+        self,
+        *,
+        project: DbtProject,
+        config: DbtvConfig,
+        workspace: Workspace,
+        run: RunWorkspace,
+        options: CommandOptions,
+        cancellation: CancellationToken | None = None,
+        event_consumer: Callable[[RunEvent], None] | None = None,
+    ) -> OrchestrationResult:
         token = cancellation or CancellationToken()
+        if options.capture_results and options.command not in {"run", "build"}:
+            raise PolicyError("Result capture requires a run or build command.")
         config.local.temp_directory.mkdir(parents=True, exist_ok=True)
         started = datetime.now(UTC)
         timings: dict[str, float] = {}
@@ -118,11 +156,32 @@ class Orchestrator:
 
         remote_attempted = False
         remote_queries = 0
+        activity_lock = threading.Lock()
+
+        def remote_event(event: str) -> None:
+            nonlocal remote_attempted, remote_queries
+            with activity_lock:
+                if event == "connection":
+                    remote_attempted = True
+                elif event == "query_completed":
+                    remote_queries += 1
+
         reused = 0
         refreshed = 0
         snapshots: tuple[DatasetSnapshot, ...] = ()
         plan: ExecutionPlan | None = None
+        budget = RunBudget(
+            config, project.root, token, max_rows=options.max_rows, max_bytes=options.max_bytes
+        )
         try:
+            budget.start()
+            workspace.write_json(
+                run.root / "execution-context.json",
+                {
+                    "config_fingerprint": execution_context(config, project.root),
+                    "initial_database_exists": config.local.database.is_file(),
+                },
+            )
             phase = time.perf_counter()
             invoker = DbtInvoker(config.project.dbt_executable)
             plan = ProjectPlanner(invoker).build(
@@ -132,6 +191,7 @@ class Orchestrator:
                 select=options.select,
                 exclude=options.exclude,
                 variables=options.variables,
+                cancellation=token,
             )
             timings["planning"] = time.perf_counter() - phase
             workspace.write_json(run.plan_path, plan.to_dict())
@@ -147,6 +207,14 @@ class Orchestrator:
                     },
                 )
             )
+            local_manifest = load_manifest(run.local_target_path / "manifest.json")
+            workspace.write_json(
+                run.root / "lineage.json",
+                lineage(
+                    local_manifest,
+                    plan.local_selected_ids,
+                ),
+            )
             transition("PLANNED")
             blocking = [finding for finding in plan.findings if finding.severity == "error"]
             if blocking:
@@ -155,73 +223,26 @@ class Orchestrator:
                     hint="Review plan.json or use configured rule overrides only after validation.",
                 )
 
-            profile_name = options.data_profile or config.default_data_profile
-            if profile_name not in config.data_profiles:
-                raise CompatibilityError(f"Unknown data profile {profile_name!r}.")
-            profile = config.data_profiles[profile_name]
-            requests: list[SnapshotRequest] = []
-            policy = LocalPolicyEngine(
-                config.policy,
-                allow_full_source=options.allow_full_source,
+            preparation = prepare_sources(
+                project=project,
+                config=config,
+                workspace=workspace,
+                state=state,
+                plan=plan,
+                options=options,
             )
-            fidelity = options.fidelity or FidelityMode(config.compatibility.mode)
-            for mapping in plan.source_mappings:
-                sampling = resolve_sampling(profile, mapping.source)
-                sampling = apply_max_rows(sampling, options.max_rows)
-                policy.evaluate_sampling(
-                    mapping.source,
-                    sampling,
-                    tags=mapping.tags,
-                    fidelity=fidelity,
-                )
-                requests.append(
-                    SnapshotRequest(
-                        source=mapping.source,
-                        relation=mapping.production_relation,
-                        sampling=sampling,
-                        fidelity=fidelity,
-                        query_tag=(
-                            f"{config.source.session.query_tag_prefix}/"
-                            f"{run.invocation_id}/{mapping.source.unique_id}"
-                        )[:256],
-                    )
-                )
+            store = preparation.store
+            decisions = tuple(source.decision for source in preparation.sources)
+            requests = [decision.request for decision in decisions]
+            workspace.write_json(
+                run.plan_path,
+                {
+                    **plan.to_dict(),
+                    "source_decisions": [source.to_dict() for source in preparation.sources],
+                },
+            )
             reporter.emit(RunEvent(run.invocation_id, "policy.allowed", "policy"))
             transition("POLICY_APPROVED")
-
-            ttl = parse_duration(options.cache_ttl or config.cache.default_ttl)
-            for mapping in plan.source_mappings:
-                for tag in mapping.tags:
-                    if tag in config.policy.max_cache_age_for_tags:
-                        ttl = min(
-                            ttl,
-                            parse_duration(config.policy.max_cache_age_for_tags[tag]),
-                        )
-            store = ParquetSnapshotStore(
-                config.cache.root,
-                state=state,
-                locks_dir=workspace.locks,
-                ttl=ttl,
-                compression=config.cache.compression,
-                row_group_target_bytes=config.cache.row_group_target_bytes,
-                integrity=config.cache.integrity,
-                maximum_size=min(
-                    parse_size(config.cache.maximum_size),
-                    parse_size(options.max_bytes) if options.max_bytes else 2**63 - 1,
-                ),
-                retain_previous=config.cache.retain_previous_snapshots,
-                file_mode=int(config.policy.cache_file_mode, 8),
-                directory_mode=int(config.policy.cache_directory_mode, 8),
-            )
-            decisions = tuple(
-                store.decide(
-                    request,
-                    provider=config.source.connector,
-                    mode=options.source_mode.value,
-                    snapshot_id=options.snapshot_id,
-                )
-                for request in requests
-            )
             missing = [
                 decision for decision in decisions if decision.action is SnapshotAction.MISSING
             ]
@@ -260,40 +281,53 @@ class Orchestrator:
 
             if refresh_decisions:
                 phase = time.perf_counter()
-                remote_attempted = True
                 registry = self.connector_registry or ConnectorRegistry()
-                capabilities = registry.capabilities(config.source.connector)
-                for decision in refresh_decisions:
-                    _validate_capabilities(decision.request.sampling, capabilities)
-                resolver = self.credential_resolver or (
-                    self.credential_registry or CredentialResolverRegistry()
-                ).create(config.source.credential_resolver)
-                credentials = resolver.resolve(
-                    profiles_dir=project.profiles_dir,
-                    profile_name=config.project.profile or project.profile_name,
-                    target_name=plan.production_target,
-                    env=os.environ,
-                    interactive=options.interactive,
-                )
+                refresh_sources = [
+                    source
+                    for source in preparation.sources
+                    if source.decision.action is SnapshotAction.REFRESH
+                ]
                 refreshed_snapshots = self._refresh(
-                    refresh_decisions,
+                    refresh_sources,
                     registry=registry,
-                    credentials=credentials,
+                    project=project,
                     config=config,
+                    options=options,
                     store=store,
                     run=run,
                     reporter=reporter,
                     cancellation=token,
                     pinned=options.keep_snapshot,
+                    budget=budget,
+                    known=resolved,
+                    on_remote_event=remote_event,
                 )
                 resolved.update(
                     {snapshot.source.unique_id: snapshot for snapshot in refreshed_snapshots}
                 )
                 refreshed = len(refreshed_snapshots)
-                remote_queries = refreshed
                 timings["extraction"] = time.perf_counter() - phase
 
             snapshots = tuple(resolved[request.source.unique_id] for request in requests)
+            workspace.write_json(
+                run.root / "cohorts.json",
+                [
+                    {
+                        "source_id": source.decision.request.source.unique_id,
+                        "parent_source_id": source.cohort_parent,
+                        "parent_snapshot": resolved[source.cohort_parent].snapshot_key,
+                        "parent_rows": resolved[source.cohort_parent].row_count,
+                        "matching_child_rows": resolved[
+                            source.decision.request.source.unique_id
+                        ].row_count,
+                        "max_keys": source.cohort.max_keys,
+                        "coverage": "Matching non-null parent keys within the child predicate; "
+                        "budgets abort instead of truncating children. Captures are independent.",
+                    }
+                    for source in preparation.sources
+                    if source.cohort and source.cohort_parent
+                ],
+            )
             transition("SOURCES_READY")
             findings = tuple(
                 finding
@@ -308,6 +342,16 @@ class Orchestrator:
             if any(finding.severity == "error" for finding in findings):
                 raise CompatibilityError("Snapshot type fidelity analysis found blocking issues.")
 
+            token.raise_if_cancelled()
+            budget.check_disk()
+            dataset_id = commit_dataset(
+                state,
+                workspace,
+                run,
+                plan,
+                snapshots,
+                asdict(options),
+            )
             dbt_stdout = ""
             dbt_stderr = ""
             dbt_results: tuple[DbtNodeResult, ...] = ()
@@ -342,24 +386,29 @@ class Orchestrator:
                     config,
                     attachments=binding_report.attachments,
                 )
+                boundaries = backend.check_prerequisites(
+                    dependency_boundaries(local_manifest, plan.local_selected_ids, options.command),
+                    dict(binding_report.attachments),
+                )
+                workspace.write_json(run.root / "dependencies.json", boundaries)
+                missing_models = [item["unique_id"] for item in boundaries if not item["available"]]
+                if missing_models:
+                    raise CompatibilityError(
+                        "Missing local prerequisites: " + ", ".join(missing_models),
+                        hint="Use --select +model for ancestors and build for seeds "
+                        "and snapshots, or materialize these prerequisites locally first.",
+                    )
                 reporter.emit(RunEvent(run.invocation_id, "binding.verified", "binding"))
                 transition("BOUND")
                 timings["binding"] = time.perf_counter() - phase
 
                 phase = time.perf_counter()
-                compile_args = self._dbt_args("compile", project, run, options)
                 with FileLock(
                     workspace.locks / "duckdb-writer.lock",
                     invocation_id=run.invocation_id,
                     command=options.command,
                     timeout_seconds=0,
                 ):
-                    invoker.run(
-                        compile_args,
-                        cwd=project.root,
-                        env=_local_dbt_environment(run),
-                        cancellation=token,
-                    )
                     reporter.emit(
                         RunEvent(
                             run.invocation_id,
@@ -383,13 +432,29 @@ class Orchestrator:
                     [asdict(item) for item in dbt_results],
                 )
                 timings["dbt"] = time.perf_counter() - phase
+                if options.capture_results and exit_code == 0:
+                    phase = time.perf_counter()
+                    capture_outputs(
+                        config=config,
+                        workspace=workspace,
+                        run=run,
+                        selected=tuple(
+                            item.unique_id for item in dbt_results if item.status == "success"
+                        ),
+                        attachments=dict(binding_report.attachments),
+                        token=token,
+                    )
+                    timings["result_capture"] = time.perf_counter() - phase
                 transition("DBT_COMPLETED")
 
+            token.raise_if_cancelled()
+            budget.check_disk()
             completed = datetime.now(UTC)
             state_name = "SUCCEEDED" if exit_code == 0 else "DBT_FAILED"
             summary = RunSummary(
                 invocation_id=run.invocation_id,
                 command=options.command,
+                dataset_id=dataset_id,
                 state=state_name,
                 exit_code=exit_code,
                 remote_connection_attempted=remote_attempted,
@@ -429,6 +494,7 @@ class Orchestrator:
             )
             return OrchestrationResult(plan, summary, snapshots, dbt_stdout, dbt_stderr)
         except BaseException as exc:
+            exc = budget.failure or exc
             completed = datetime.now(UTC)
             exit_code = exc.exit_code if isinstance(exc, DbtvError) else 10
             if isinstance(exc, DbtvError):
@@ -468,45 +534,102 @@ class Orchestrator:
                     attributes=failure,
                 )
             )
-            raise
+            raise exc
+        finally:
+            budget.stop()
+            workspace.write_json(run.root / "resources.json", budget.to_dict())
 
     def _refresh(
         self,
-        decisions: list[SnapshotDecision],
+        sources: list[PlannedSource],
         *,
         registry: ConnectorRegistry,
-        credentials: object,
+        project: DbtProject,
         config: DbtvConfig,
+        options: CommandOptions,
         store: ParquetSnapshotStore,
         run: RunWorkspace,
         reporter: EventReporter,
         cancellation: CancellationToken,
         pinned: bool,
+        budget: RunBudget,
+        known: dict[str, DatasetSnapshot],
+        on_remote_event: Callable[[str], None],
     ) -> tuple[DatasetSnapshot, ...]:
-        def refresh(decision: SnapshotDecision) -> DatasetSnapshot:
+        credentials: dict[str, object] = {}
+        sessions: dict[str, LifoQueue[Any]] = {}
+        for source in sources:
+            settings = source.settings
+            capabilities = registry.capabilities(settings.connector)
+            _validate_capabilities(source.decision.request.sampling, capabilities)
+            if source.decision.request.projection and not capabilities.projection_pushdown:
+                raise PolicyError("The selected connector does not support projections.")
+            if source.connection_name in sessions:
+                continue
+            sessions[source.connection_name] = LifoQueue()
+            if settings.credential_resolver == "none":
+                credentials[source.connection_name] = None
+            else:
+                resolver = self.credential_resolver or (
+                    self.credential_registry or CredentialResolverRegistry()
+                ).create(settings.credential_resolver)
+                credentials[source.connection_name] = resolver.resolve(
+                    profiles_dir=project.profiles_dir,
+                    profile_name=settings.profile or config.project.profile or project.profile_name,
+                    target_name=settings.target or config.project.production_target or "",
+                    env=os.environ,
+                    interactive=options.interactive,
+                )
+
+        def refresh(source: PlannedSource) -> DatasetSnapshot:
             cancellation.raise_if_cancelled()
+            decision, settings = source.decision, source.settings
+            source_id = decision.request.source.unique_id
             reporter.emit(
                 RunEvent(
                     run.invocation_id,
                     "snapshot.refresh_started",
                     "extraction",
-                    attributes={"source_id": decision.request.source.unique_id},
+                    attributes={"source_id": source_id},
                 )
             )
-            connector = registry.create(
-                config.source.connector,
-                credentials=credentials,
-                session=config.source.session,
-                extraction=config.source.extraction,
-                plugin_config=config.source.plugin,
-            )
+            available = sessions[source.connection_name]
             try:
-                connector.open()
+                connector = available.get_nowait()
+            except Empty:
+                connector = registry.create(
+                    settings.connector,
+                    credentials=credentials[source.connection_name],
+                    session=settings.session,
+                    extraction=settings.extraction,
+                    plugin_config=settings.plugin,
+                )
+                try:
+                    if registry.capabilities(settings.connector).remote_access:
+                        on_remote_event("connection")
+                    connector.open()
+                except BaseException:
+                    connector.close()
+                    raise
+            try:
                 source_version = connector.source_version(decision.request.relation)
+
+                def bounded_batches() -> Iterable[ExtractionBatch]:
+                    for batch in connector.extract(decision.request, cancellation):
+                        cancellation.raise_if_cancelled()
+                        budget.consume(source_id, batch.data.num_rows, batch.data.nbytes)
+                        yield batch
+                        budget.check_disk()
+                    if registry.capabilities(settings.connector).remote_access:
+                        on_remote_event("query_completed")
+                    after = connector.source_version(decision.request.relation)
+                    if source_version and after and source_version.value != after.value:
+                        raise PolicyError(f"Source changed during extraction: {source_id}.")
+
                 snapshot = store.write(
                     decision.request,
-                    provider=config.source.connector,
-                    batches=connector.extract(decision.request, cancellation),
+                    provider=settings.connector,
+                    batches=bounded_batches(),
                     cancellation=cancellation,
                     invocation_id=run.invocation_id,
                     source_version=source_version,
@@ -522,7 +645,7 @@ class Orchestrator:
                         "snapshot.committed",
                         "snapshot",
                         attributes={
-                            "source_id": decision.request.source.unique_id,
+                            "source_id": source_id,
                             "snapshot_key": snapshot.snapshot_key,
                             "rows": snapshot.row_count,
                             "bytes": snapshot.byte_count,
@@ -531,26 +654,39 @@ class Orchestrator:
                 )
                 return snapshot
             finally:
-                connector.close()
+                available.put(connector)
 
-        workers = min(config.source.extraction.parallel_sources, len(decisions))
-        futures: dict[Future[DatasetSnapshot], SnapshotDecision] = {}
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dbtv-extract") as pool:
-            for decision in decisions:
-                futures[pool.submit(refresh, decision)] = decision
-            completed: list[DatasetSnapshot] = []
-            try:
-                for future in as_completed(futures):
-                    completed.append(future.result())
-            except BaseException:
-                cancellation.cancel()
-                for future in futures:
-                    future.cancel()
-                raise
-        ordered = tuple(sorted(completed, key=lambda snapshot: snapshot.source.unique_id))
-        for snapshot in ordered:
-            store.activate(snapshot)
-        return ordered
+        completed: list[DatasetSnapshot] = []
+        try:
+            for level in source_levels(sources):
+                prepared = [
+                    materialize_cohort(source, known[source.cohort_parent], config)
+                    if source.cohort_parent
+                    else source
+                    for source in level
+                ]
+                workers = min(config.source.extraction.parallel_sources, len(prepared))
+                futures: dict[Future[DatasetSnapshot], PlannedSource] = {}
+                with ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix="dbtv-extract"
+                ) as pool:
+                    for source in prepared:
+                        futures[pool.submit(refresh, source)] = source
+                    try:
+                        for future in as_completed(futures):
+                            snapshot = future.result()
+                            completed.append(snapshot)
+                            known[snapshot.source.unique_id] = snapshot
+                    except BaseException:
+                        cancellation.cancel()
+                        for future in futures:
+                            future.cancel()
+                        raise
+        finally:
+            for available in sessions.values():
+                while not available.empty():
+                    available.get_nowait().close()
+        return tuple(sorted(completed, key=lambda snapshot: snapshot.source.unique_id))
 
     @staticmethod
     def _dbt_args(

@@ -19,6 +19,7 @@ class ProjectSettings(StrictModel):
     profile: str | None = None
     production_target: str | None = None
     partial_parse: bool = True
+    cache_parsing: bool = True
 
 
 class SourceSessionSettings(StrictModel):
@@ -42,6 +43,15 @@ class SourceSettings(StrictModel):
     session: SourceSessionSettings = Field(default_factory=SourceSessionSettings)
     extraction: ExtractionSettings = Field(default_factory=ExtractionSettings)
     plugin: dict[str, object] = Field(default_factory=dict)
+    profile: str | None = None
+    target: str | None = None
+    identity: dict[str, str] = Field(default_factory=dict)
+
+
+class SourceRoute(StrictModel):
+    select: str
+    connection: str
+    projection: list[str] | None = None
 
 
 class LocalSettings(StrictModel):
@@ -52,8 +62,10 @@ class LocalSettings(StrictModel):
     memory_limit: str = "8GB"
     temp_directory: Path = Path(".dbtv/tmp")
     preserve_identifier_case: bool = True
+    max_temp_directory_size: str = "20GB"
+    inspect_max_rows: int = Field(default=1000, ge=1)
 
-    @field_validator("memory_limit")
+    @field_validator("memory_limit", "max_temp_directory_size")
     @classmethod
     def validate_memory_limit(cls, value: str) -> str:
         parse_size(value)
@@ -111,9 +123,18 @@ class SourceSamplingRule(SamplingRule):
     select: str
 
 
+class CohortRule(StrictModel):
+    select: str
+    parent: str
+    parent_key: str
+    key: str
+    max_keys: int = Field(default=1000, ge=1, le=10_000)
+
+
 class DataProfile(StrictModel):
     default: SamplingRule
     sources: list[SourceSamplingRule] = Field(default_factory=list)
+    cohorts: list[CohortRule] = Field(default_factory=list)
 
 
 class CompatibilitySettings(StrictModel):
@@ -128,6 +149,9 @@ class PolicySettings(StrictModel):
     allow_full_source: bool = False
     max_rows_per_source: int = Field(default=5_000_000, gt=0)
     max_estimated_bytes_per_run: str = "20GB"
+    max_extracted_bytes_per_run: str = "20GB"
+    max_workspace_bytes: str = "150GB"
+    minimum_free_disk: str = "1GB"
     require_explicit_where_for_tags: list[str] = Field(default_factory=list)
     deny_source_tags: list[str] = Field(default_factory=list)
     max_cache_age_for_tags: dict[str, str] = Field(default_factory=dict)
@@ -135,7 +159,12 @@ class PolicySettings(StrictModel):
     cache_file_mode: str = "0600"
     cache_directory_mode: str = "0700"
 
-    @field_validator("max_estimated_bytes_per_run")
+    @field_validator(
+        "max_estimated_bytes_per_run",
+        "max_extracted_bytes_per_run",
+        "max_workspace_bytes",
+        "minimum_free_disk",
+    )
     @classmethod
     def validate_max_estimated_bytes(cls, value: str) -> str:
         parse_size(value)
@@ -166,6 +195,8 @@ class DbtvConfig(StrictModel):
     version: Literal[1] = 1
     project: ProjectSettings = Field(default_factory=ProjectSettings)
     source: SourceSettings = Field(default_factory=SourceSettings)
+    connections: dict[str, SourceSettings] = Field(default_factory=dict)
+    routes: list[SourceRoute] = Field(default_factory=list)
     local: LocalSettings = Field(default_factory=LocalSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     data_profiles: dict[str, DataProfile] = Field(
@@ -202,6 +233,11 @@ class DbtvConfig(StrictModel):
     def validate_profile_reference(self) -> DbtvConfig:
         if self.default_data_profile not in self.data_profiles:
             raise ValueError(f"default_data_profile {self.default_data_profile!r} is not defined")
+        for route in self.routes:
+            if route.connection not in self.connections:
+                raise ValueError(f"Source route references unknown connection {route.connection!r}")
+            if route.projection is not None and not route.projection:
+                raise ValueError("A source projection must contain at least one column")
         return self
 
 

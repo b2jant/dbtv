@@ -15,3 +15,10 @@ The UV lockfile is the tested dependency set for this revision. A company pilot 
 narrow this matrix to versions used by its representative projects and authentication
 modes. macOS is the currently verified development host; Linux and Windows require CI
 and pilot validation before being advertised internally as supported.
+
+
+Source connectors implemented in this revision: Snowflake and local Parquet. Parquet
+supports a local file or directory, Arrow streaming, projection, predicate, limit, and
+hash sampling. Named source routes and single-key cohorts share the runtime; warehouse
+transaction consistency, composite cohorts, and additional source connectors are not
+implemented. See [local workflows](local-runtime.md) for validation and replay limits.

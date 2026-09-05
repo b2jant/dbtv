@@ -1,0 +1,174 @@
+{
+  "cpu_count": 10,
+  "engine_versions": {
+    "dbt-core": "1.11.14",
+    "dbt-duckdb": "1.11.0",
+    "dbt-snowflake": "not-installed",
+    "dbtv": "0.1.0a1",
+    "duckdb": "1.5.5",
+    "pyarrow": "23.0.1"
+  },
+  "execution_environment": "Built wheel in an isolated uv environment with only the DuckDB extra",
+  "input_parquet_bytes": 424221,
+  "measurements": [
+    {
+      "parsing": {
+        "cache_key": "593c70cab5c99f5876567df86b2244d56b66c81e1316031f2694ad3e8abd0fdf",
+        "local_partial_parse_restored": false,
+        "production_partial_parse_restored": false,
+        "selection": "native dbt ls on every plan"
+      },
+      "refreshed": 1,
+      "remote_queries": 0,
+      "reused": 0,
+      "scenario": "cold",
+      "timings": {
+        "binding": 0.028088584000215633,
+        "dbt": 1.2261040419998608,
+        "extraction": 2.5622784169991064,
+        "planning": 4.495471040998382
+      },
+      "wall_seconds": 8.328306958999747
+    },
+    {
+      "parsing": {
+        "cache_key": "593c70cab5c99f5876567df86b2244d56b66c81e1316031f2694ad3e8abd0fdf",
+        "local_partial_parse_restored": true,
+        "production_partial_parse_restored": true,
+        "selection": "native dbt ls on every plan"
+      },
+      "refreshed": 0,
+      "remote_queries": 0,
+      "reused": 1,
+      "scenario": "warm",
+      "timings": {
+        "binding": 0.021993415999531862,
+        "dbt": 1.189081292000992,
+        "planning": 1.5173935410002741
+      },
+      "wall_seconds": 2.7427347499997268
+    },
+    {
+      "parsing": {
+        "cache_key": "593c70cab5c99f5876567df86b2244d56b66c81e1316031f2694ad3e8abd0fdf",
+        "local_partial_parse_restored": true,
+        "production_partial_parse_restored": true,
+        "selection": "native dbt ls on every plan"
+      },
+      "refreshed": 0,
+      "remote_queries": 0,
+      "reused": 1,
+      "scenario": "warm",
+      "timings": {
+        "binding": 0.02167933399869071,
+        "dbt": 1.1992069999996602,
+        "planning": 1.520979458000511
+      },
+      "wall_seconds": 2.7571307919988612
+    },
+    {
+      "parsing": {
+        "cache_key": "593c70cab5c99f5876567df86b2244d56b66c81e1316031f2694ad3e8abd0fdf",
+        "local_partial_parse_restored": true,
+        "production_partial_parse_restored": true,
+        "selection": "native dbt ls on every plan"
+      },
+      "refreshed": 0,
+      "remote_queries": 0,
+      "reused": 1,
+      "scenario": "warm",
+      "timings": {
+        "binding": 0.022241624999878695,
+        "dbt": 1.189453125,
+        "planning": 1.5202372910007398
+      },
+      "wall_seconds": 2.748910791000526
+    },
+    {
+      "parsing": {
+        "cache_key": "479cdcd5de63406e76adad02516e314adac11bfeee3b8a7d27d28f0ac93f074d",
+        "local_partial_parse_restored": false,
+        "production_partial_parse_restored": false,
+        "selection": "native dbt ls on every plan"
+      },
+      "refreshed": 0,
+      "remote_queries": 0,
+      "reused": 1,
+      "scenario": "edited",
+      "timings": {
+        "binding": 0.02198429199961538,
+        "dbt": 1.185451875000581,
+        "planning": 2.166452625000602
+      },
+      "wall_seconds": 3.392854375000752
+    },
+    {
+      "parsing": {
+        "cache_key": "479cdcd5de63406e76adad02516e314adac11bfeee3b8a7d27d28f0ac93f074d",
+        "local_partial_parse_restored": true,
+        "production_partial_parse_restored": true,
+        "selection": "native dbt ls on every plan"
+      },
+      "refreshed": 0,
+      "remote_queries": 0,
+      "reused": 1,
+      "scenario": "offline",
+      "timings": {
+        "binding": 0.022014624999428634,
+        "dbt": 1.1955516250000073,
+        "planning": 1.5251413339992723
+      },
+      "wall_seconds": 2.7613168329990003
+    },
+    {
+      "parsing": {
+        "cache_key": "479cdcd5de63406e76adad02516e314adac11bfeee3b8a7d27d28f0ac93f074d",
+        "local_partial_parse_restored": true,
+        "production_partial_parse_restored": true,
+        "selection": "native dbt ls on every plan"
+      },
+      "refreshed": 0,
+      "remote_queries": 0,
+      "reused": 1,
+      "scenario": "offline",
+      "timings": {
+        "binding": 0.021719124999435735,
+        "dbt": 1.192160624999815,
+        "planning": 1.528100709001592
+      },
+      "wall_seconds": 2.7616327080013434
+    },
+    {
+      "parsing": {
+        "cache_key": "479cdcd5de63406e76adad02516e314adac11bfeee3b8a7d27d28f0ac93f074d",
+        "local_partial_parse_restored": true,
+        "production_partial_parse_restored": true,
+        "selection": "native dbt ls on every plan"
+      },
+      "refreshed": 0,
+      "remote_queries": 0,
+      "reused": 1,
+      "scenario": "offline",
+      "timings": {
+        "binding": 0.021422542000436806,
+        "dbt": 1.1952872080000816,
+        "planning": 1.5236265000003186
+      },
+      "wall_seconds": 2.760739499999545
+    }
+  ],
+  "median_seconds": {
+    "cold": 8.328306958999747,
+    "edited": 3.392854375000752,
+    "offline": 2.7613168329990003,
+    "warm": 2.748910791000526
+  },
+  "notes": [
+    "Cold is the first invocation in the fresh package environment and includes first-use adapter and Arrow startup.",
+    "Warm and offline medians each use three runs; original source files are removed before offline execution."
+  ],
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "python": "3.12.8",
+  "rows": 100000,
+  "scope": "Local synthetic aggregation; no warehouse or production speedup claim."
+}

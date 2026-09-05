@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -167,7 +168,41 @@ class DuckDbExecutionBackend:
                 hint="Inspect the binding artifact and local manifest relation names.",
             ) from exc
 
-    def inspect(self, query: str) -> tuple[tuple[str, ...], tuple[tuple[Any, ...], ...]]:
+    def check_prerequisites(
+        self, boundaries: list[dict[str, Any]], attachments: dict[str, Path]
+    ) -> list[dict[str, Any]]:
+        import duckdb
+
+        connection = duckdb.connect(str(self.database), read_only=True)
+        try:
+            for catalog, path in attachments.items():
+                connection.execute(
+                    f"ATTACH {quote_duckdb_string(str(path))} AS "
+                    f"{quote_duckdb_identifier(catalog)} (READ_ONLY)"
+                )
+            results = []
+            for boundary in boundaries:
+                relation = boundary["relation"]
+                present = False
+                if relation:
+                    rendered = ".".join(
+                        quote_duckdb_identifier(relation[key])
+                        for key in ("catalog", "schema", "identifier")
+                        if relation.get(key)
+                    )
+                    try:
+                        connection.execute(f"SELECT * FROM {rendered} LIMIT 0")
+                        present = True
+                    except duckdb.Error:
+                        pass
+                results.append({**boundary, "available": present})
+            return results
+        finally:
+            connection.close()
+
+    def inspect(
+        self, query: str, *, max_rows: int = 1000, allowed_paths: tuple[Path, ...] = ()
+    ) -> tuple[tuple[str, ...], tuple[tuple[Any, ...], ...]]:
         one_statement = ";" not in query.rstrip().rstrip(";")
         if (
             not one_statement
@@ -184,12 +219,26 @@ class DuckDbExecutionBackend:
             connection = duckdb.connect(
                 str(self.database),
                 read_only=True,
-                config={"enable_external_access": "false"},
+                config={"memory_limit": "1GB", "threads": 1},
             )
             try:
+                catalog_map = self.workspace.catalogs / "catalog-map.json"
+                if catalog_map.is_file():
+                    for catalog, path in json.loads(catalog_map.read_text()).items():
+                        resolved = Path(path).resolve()
+                        if resolved.is_relative_to(self.workspace.catalogs.resolve()):
+                            connection.execute(
+                                f"ATTACH {quote_duckdb_string(str(resolved))} AS "
+                                f"{quote_duckdb_identifier(catalog)} (READ_ONLY)"
+                            )
+                paths = ", ".join(
+                    quote_duckdb_string(str(path.resolve())) for path in allowed_paths
+                )
+                connection.execute(f"SET allowed_paths = [{paths}]")
+                connection.execute("SET enable_external_access = false")
                 cursor = connection.execute(query)
                 columns = tuple(item[0] for item in (cursor.description or ()))
-                rows = tuple(tuple(row) for row in cursor.fetchall())
+                rows = tuple(tuple(row) for row in cursor.fetchmany(max_rows))
                 return columns, rows
             finally:
                 connection.close()

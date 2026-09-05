@@ -32,3 +32,14 @@ refresh, and offline timings for representative selections. The final run artifa
 already contain per-phase timings suitable for aggregation. Pilot ownership, security
 approval, hardware baselines, and production incident paths are organization-specific
 release gates rather than code defaults.
+
+
+The local runtime suite also exercises Parquet connector routing, source identity
+separation, dataset rollback/recovery, cohort coverage and budget failure, frozen-input
+replay, exact duplicate-aware comparison, and a failing incremental-update scenario.
+Use `scripts/benchmark_local.py` for the repeatable local benchmark; its JSON report
+records per-phase timings and evidence of partial parse reuse/invalidation.
+
+See [Snowflake correctness validation](snowflake-validation.md) for the verified test
+evidence, the current live-test and CI gaps, and the required comparison of a complex
+model graph against normal dbt execution in Snowflake.

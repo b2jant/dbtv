@@ -23,7 +23,7 @@ def snapshot_key(
         {
             "request_fingerprint": request_fingerprint(request, provider),
             "schema": asdict(schema),
-            "source_version": asdict(source_version) if source_version else None,
+            "source_version": {"value": source_version.value} if source_version else None,
             "content_fingerprint": content_fingerprint,
         }
     )

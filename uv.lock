@@ -546,6 +546,7 @@ duckdb = [
     { name = "dbt-core" },
     { name = "dbt-duckdb" },
     { name = "duckdb" },
+    { name = "pyarrow" },
 ]
 snowflake = [
     { name = "dbt-core" },
@@ -564,6 +565,7 @@ requires-dist = [
     { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.2,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<2" },
     { name = "platformdirs", specifier = ">=4.3,<5" },
+    { name = "pyarrow", marker = "extra == 'duckdb'", specifier = ">=18,<24" },
     { name = "pyarrow", marker = "extra == 'snowflake'", specifier = ">=18,<24" },
     { name = "pydantic", specifier = ">=2.9,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3,<10" },

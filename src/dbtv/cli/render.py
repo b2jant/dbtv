@@ -98,7 +98,10 @@ def render_plan(
                 str(item["reason"]),
             )
         console.print(decisions)
-        remote = any(item["action"] == "refresh" for item in source_decisions)
+        remote = any(
+            item["action"] == "refresh" and not item.get("local_input", False)
+            for item in source_decisions
+        )
         console.print(f"Remote access on execution: {'yes' if remote else 'no'}")
     for finding in plan.findings:
         style = "red" if finding.severity == "error" else "yellow"
@@ -136,6 +139,8 @@ def render_summary(summary: RunSummary, *, output: str = "console") -> None:
     table.add_row(
         "Snapshots", f"{summary.snapshots_reused} reused, {summary.snapshots_refreshed} refreshed"
     )
+    if summary.dataset_id:
+        table.add_row("Dataset", summary.dataset_id)
     table.add_row("DuckDB", str(summary.local_database))
     table.add_row("dbt target", summary.dbt_target)
     if summary.dbt_results:

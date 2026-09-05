@@ -5,11 +5,11 @@ selection, committing it as reusable local snapshots, and running the project's 
 models against DuckDB.
 
 ```text
-Snowflake -> Arrow batches -> immutable Parquet snapshots -> DuckDB -> dbt
+Snowflake / local Parquet -> Arrow -> immutable datasets -> DuckDB -> local dbt
 ```
 
-The source boundary is plugin-based. Snowflake is the first implementation, while the
-snapshot, policy, DuckDB, and dbt execution layers contain no provider-specific logic.
+The source boundary is plugin-based, with Snowflake and local Parquet implementations.
+Named connections route sources independently; storage and execution share one local path.
 A future Databricks, Iceberg, or other Arrow-capable connector can reuse the complete
 local path.
 
@@ -24,7 +24,10 @@ local path.
 - immutable Parquet snapshots, atomic commits, integrity checks, TTLs, quotas, pinning,
   activation, state rebuild, and garbage collection;
 - exact three-part DuckDB source binding, including quoted catalogs and schemas;
-- isolated local `dbt compile`, `run`, `test`, and `build` invocations;
+- local `run`, `test`, and `build` with dbt-owned compilation and reusable parsing;
+- atomic source-set activation, connection-scoped caches, and frozen-input replay;
+- key cohorts, actual extraction budgets, spill limits, and dependency diagnostics;
+- isolated incremental validation and exact captured-output comparison;
 - warm `cached` and strict zero-connector `offline` modes;
 - source-tag policy controls, compatibility findings, redacted events, and diagnostics;
 - read-only inspection and guarded cleanup.
@@ -99,8 +102,27 @@ Every execution summary states whether remote access was attempted, how many sou
 queries completed, which snapshots were reused or refreshed, the DuckDB path, dbt
 status, timings, and artifact directory.
 
+## Frozen inputs and validation
+
+```bash
+dbtv build --select +fct_orders --capture-results
+dbtv datasets list
+dbtv replay <run-uuid>
+dbtv compare <original-run-uuid> <replay-run-uuid>
+dbtv validate-incremental --base-dataset sha256:... --next-dataset sha256:...
+```
+
+DBTV stays a Python CLI using the native DuckDB engine. It invokes installed local dbt;
+**dbt Cloud is not required**. Source refreshes can query Snowflake directly using
+`authenticator: externalbrowser` in a local dbt profile.
+
+See [local runtime workflows](docs/local-runtime.md) for named connections, cohorts,
+replay limitations, disk budgets, and benchmark results.
+
 ## Documentation
 
+- [Local runtime workflows](docs/local-runtime.md)
+- [Ranked improvements and verification](docs/local-runtime-roadmap.md)
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
 - [Command reference](docs/commands.md)
@@ -108,6 +130,7 @@ status, timings, and artifact directory.
 - [Security model](docs/security.md)
 - [Troubleshooting and recovery](docs/troubleshooting.md)
 - [Development and testing](docs/development.md)
+- [Snowflake correctness validation](docs/snowflake-validation.md)
 - [Initial support matrix](docs/support-matrix.md)
 - [Implementation status and external release gates](docs/implementation-status.md)
 - [Full implementation plan](docs/implementation-plan.md)

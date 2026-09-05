@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from dbtv.core.errors import CacheError
 from dbtv.core.locks import FileLock
 from dbtv.core.models import DatasetSnapshot, SourceBinding
 
@@ -27,7 +29,7 @@ class SnapshotIndexRecord:
 
 
 class StateIndex:
-    """Rebuildable SQLite index; snapshot sidecar metadata remains authoritative."""
+    """Snapshot index and transactional dataset publication; sidecars support recovery."""
 
     def __init__(self, path: Path, locks_dir: Path) -> None:
         self.path = path
@@ -76,6 +78,17 @@ class StateIndex:
                         snapshot_key TEXT NOT NULL,
                         local_relation_json TEXT NOT NULL,
                         PRIMARY KEY (invocation_id, source_unique_id)
+                    );
+                    CREATE TABLE IF NOT EXISTS datasets (
+                        dataset_id TEXT PRIMARY KEY,
+                        payload TEXT NOT NULL,
+                        active INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE TABLE IF NOT EXISTS dataset_snapshots (
+                        dataset_id TEXT NOT NULL,
+                        source_unique_id TEXT NOT NULL,
+                        snapshot_key TEXT NOT NULL,
+                        PRIMARY KEY(dataset_id, source_unique_id)
                     );
                     """
             )
@@ -141,15 +154,75 @@ class StateIndex:
             )
 
     def activate(self, source_unique_id: str, snapshot_key: str) -> None:
+        self.activate_many({source_unique_id: snapshot_key})
+
+    def activate_many(self, snapshots: Mapping[str, str]) -> None:
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._activate(connection, snapshots)
+
+    @staticmethod
+    def _activate(connection: sqlite3.Connection, snapshots: Mapping[str, str]) -> None:
+        for source_id, snapshot_key in snapshots.items():
+            row = connection.execute(
+                "SELECT request_fingerprint FROM snapshots "
+                "WHERE snapshot_key=? AND source_unique_id=? AND state='COMMITTED'",
+                (snapshot_key, source_id),
+            ).fetchone()
+            if row is None:
+                raise CacheError(f"Cannot activate missing or corrupt snapshot {snapshot_key}.")
             connection.execute(
-                "UPDATE snapshots SET active=0 WHERE source_unique_id=?",
-                (source_unique_id,),
+                "UPDATE snapshots SET active=0 WHERE source_unique_id=? AND request_fingerprint=?",
+                (source_id, row["request_fingerprint"]),
             )
             connection.execute(
                 "UPDATE snapshots SET active=1 WHERE snapshot_key=?",
                 (snapshot_key,),
             )
+
+    def commit_dataset(self, dataset_id: str, payload: dict[str, Any]) -> None:
+        snapshots = {str(k): str(v) for k, v in payload["snapshots"].items()}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._activate(connection, snapshots)
+            connection.execute("UPDATE datasets SET active=0")
+            connection.execute(
+                "INSERT INTO datasets(dataset_id, payload, active) VALUES (?, ?, 1) "
+                "ON CONFLICT(dataset_id) DO UPDATE SET active=1",
+                (dataset_id, json.dumps(payload, sort_keys=True)),
+            )
+            connection.executemany(
+                "INSERT OR IGNORE INTO dataset_snapshots VALUES (?, ?, ?)",
+                [(dataset_id, source_id, key) for source_id, key in snapshots.items()],
+            )
+
+    def get_dataset(self, dataset_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM datasets WHERE dataset_id=?", (dataset_id,)
+            ).fetchone()
+        if row is None:
+            raise CacheError(f"Working dataset {dataset_id!r} was not found.")
+        return dict(json.loads(row["payload"]))
+
+    def list_datasets(self) -> tuple[dict[str, Any], ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload, active FROM datasets ORDER BY rowid"
+            ).fetchall()
+        return tuple({**json.loads(row["payload"]), "active": bool(row["active"])} for row in rows)
+
+    def dataset_references(self) -> set[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT snapshot_key FROM dataset_snapshots"
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def delete_dataset(self, dataset_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM dataset_snapshots WHERE dataset_id=?", (dataset_id,))
+            connection.execute("DELETE FROM datasets WHERE dataset_id=?", (dataset_id,))
 
     def mark_corrupt(self, snapshot_key: str) -> None:
         with self._connect() as connection:

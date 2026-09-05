@@ -178,8 +178,6 @@ class ParquetSnapshotStore:
                     byte_count += size
                     row_count += table.num_rows
                     if self.current_size() + byte_count > self.maximum_size:
-                        self.garbage_collect(invocation_id=invocation_id)
-                    if self.current_size() + byte_count > self.maximum_size:
                         raise CacheError(
                             "Snapshot cache quota would be exceeded.",
                             hint="Run `dbtv clean --snapshots --preview` or lower the working set.",
@@ -234,6 +232,7 @@ class ParquetSnapshotStore:
                     query_tag=request.query_tag,
                     provider_version=provider_version,
                     pinned=pinned,
+                    connection_scope=request.connection_scope,
                 )
                 (pending / "metadata.json").write_text(
                     json.dumps(_metadata(snapshot), indent=2, sort_keys=True) + "\n",
@@ -252,6 +251,26 @@ class ParquetSnapshotStore:
                     shutil.rmtree(pending)
                     existing = self.load(final / "metadata.json")
                     self.validate(existing)
+                    if pinned and not existing.pinned:
+                        existing = self.pin(existing)
+                    # Capture identity is immutable. A separate receipt records that
+                    # an identical input was actually re-read, including its new TTL.
+                    receipt = {
+                        "snapshot_key": existing.snapshot_key,
+                        "verified_at": completed.isoformat(),
+                        "expires_at": (completed + self.ttl).isoformat(),
+                        "query_id": query_id,
+                        "query_tag": request.query_tag,
+                    }
+                    temporary = final / ".observation.json.tmp"
+                    temporary.write_text(json.dumps(receipt, sort_keys=True) + "\n")
+                    temporary.chmod(self.file_mode)
+                    os.replace(temporary, final / "observation.json")
+                    existing = replace(
+                        existing,
+                        verified_at=receipt["verified_at"],
+                        expires_at=receipt["expires_at"],
+                    )
                     self.state.record_snapshot(existing, final / "metadata.json")
                     if activate:
                         self.state.activate(existing.source.unique_id, existing.snapshot_key)
@@ -285,7 +304,20 @@ class ParquetSnapshotStore:
     def load(self, metadata_path: Path) -> DatasetSnapshot:
         try:
             raw = json.loads(metadata_path.read_text(encoding="utf-8"))
-            return _snapshot_from_metadata(raw, metadata_path.parent)
+            snapshot = _snapshot_from_metadata(raw, metadata_path.parent)
+            receipt_path = metadata_path.parent / "observation.json"
+            if receipt_path.is_file():
+                receipt = json.loads(receipt_path.read_text())
+                if receipt["snapshot_key"] != snapshot.snapshot_key:
+                    raise ValueError("Observation does not match its snapshot")
+                verified = datetime.fromisoformat(receipt["verified_at"])
+                expiry = datetime.fromisoformat(receipt["expires_at"])
+                if verified.tzinfo is None or expiry.tzinfo is None:
+                    raise ValueError("Observation must have timezone-aware timestamps")
+                snapshot = replace(
+                    snapshot, verified_at=verified.isoformat(), expires_at=expiry.isoformat()
+                )
+            return snapshot
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise CacheError(f"Invalid snapshot metadata at {metadata_path}.") from exc
 
@@ -351,11 +383,12 @@ class ParquetSnapshotStore:
         removed = 0
         bytes_removed = 0
         records = self.state.list_snapshots()
+        referenced = self.state.dataset_references()
         retained_by_source: dict[str, int] = {}
         for record in records:
             retained = retained_by_source.get(record.source_unique_id, 0)
             keep_history = retained < self.retain_previous
-            if record.active or record.pinned or keep_history:
+            if record.active or record.pinned or keep_history or record.snapshot_key in referenced:
                 retained_by_source[record.source_unique_id] = retained + 1
                 continue
             if older_than and datetime.fromisoformat(record.created_at) >= older_than:
@@ -380,18 +413,51 @@ class ParquetSnapshotStore:
                 recovered.append(snapshot)
             except CacheError:
                 corrupt += 1
+        # Scoped snapshots are published only through complete datasets. An interrupted
+        # refresh may have written valid files without publishing its source set.
         for snapshot in sorted(recovered, key=lambda item: item.completed_at):
-            self.state.activate(snapshot.source.unique_id, snapshot.snapshot_key)
+            if not snapshot.connection_scope:
+                self.state.activate(snapshot.source.unique_id, snapshot.snapshot_key)
+        payloads = {item["dataset_id"]: item for item in self.state.list_datasets()}
+        directory = self.state.path.parent / "datasets"
+        for path in directory.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text())
+                identity = {
+                    key: payload[key]
+                    for key in (
+                        "format_version",
+                        "snapshots",
+                        "source_scopes",
+                    )
+                }
+                if sha256_value(identity) == payload["dataset_id"]:
+                    payloads.setdefault(payload["dataset_id"], payload)
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        for payload in sorted(
+            payloads.values(),
+            key=lambda item: (
+                bool(item.get("active")),
+                max((source["completed_at"] for source in item.get("sources", [])), default=""),
+            ),
+        ):
+            try:
+                self.state.commit_dataset(payload["dataset_id"], payload)
+            except CacheError:
+                continue
         return {"snapshots_recovered": len(recovered), "corrupt_snapshots": corrupt}
 
     def _load_record(self, record: SnapshotIndexRecord) -> DatasetSnapshot:
         return self.load(record.metadata_path)
 
-    @staticmethod
-    def _expired(snapshot: DatasetSnapshot) -> bool:
-        return bool(
-            snapshot.expires_at and datetime.fromisoformat(snapshot.expires_at) <= datetime.now(UTC)
+    def _expired(self, snapshot: DatasetSnapshot) -> bool:
+        current_expiry = (
+            datetime.fromisoformat(snapshot.verified_at or snapshot.completed_at) + self.ttl
         )
+        if snapshot.expires_at:
+            current_expiry = min(current_expiry, datetime.fromisoformat(snapshot.expires_at))
+        return current_expiry <= datetime.now(UTC)
 
 
 def _canonical_schema(schema: Any) -> CanonicalSchema:
@@ -404,6 +470,7 @@ def _canonical_schema(schema: Any) -> CanonicalSchema:
 def _metadata(snapshot: DatasetSnapshot) -> dict[str, Any]:
     return {
         "format_version": 1,
+        "connection_scope": snapshot.connection_scope,
         "snapshot_key": snapshot.snapshot_key,
         "request_fingerprint": snapshot.request_fingerprint,
         "content_fingerprint": snapshot.content_fingerprint,
@@ -479,6 +546,7 @@ def _snapshot_from_metadata(raw: dict[str, Any], root: Path) -> DatasetSnapshot:
         query_tag=raw.get("query", {}).get("query_tag"),
         provider_version=raw.get("provider", {}).get("connector_version"),
         pinned=bool(raw.get("pinned", False)),
+        connection_scope=str(raw.get("connection_scope", "")),
     )
 
 

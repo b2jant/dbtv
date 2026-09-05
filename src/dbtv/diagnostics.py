@@ -23,6 +23,14 @@ _SAFE_RUN_FILES = {
     "compatibility.json",
     "bindings.json",
     "dbt-results.json",
+    "resources.json",
+    "parsing.json",
+    "dependencies.json",
+    "lineage.json",
+    "cohorts.json",
+    "comparison.json",
+    "incremental-validation.json",
+    "replay.json",
 }
 
 
@@ -95,7 +103,7 @@ def create_diagnostics_bundle(
 def _write_json(archive: zipfile.ZipFile, name: str, value: Any) -> None:
     archive.writestr(
         name,
-        json.dumps(redact(value), indent=2, sort_keys=True, default=str) + "\n",
+        json.dumps(_diagnostic_value(value), indent=2, sort_keys=True, default=str) + "\n",
     )
 
 
@@ -106,8 +114,23 @@ def _redact_text(text: str) -> str:
         lines: list[str] = []
         for line in text.splitlines():
             try:
-                lines.append(json.dumps(redact(json.loads(line)), sort_keys=True))
+                lines.append(json.dumps(_diagnostic_value(json.loads(line)), sort_keys=True))
             except json.JSONDecodeError:
                 lines.append(redact_text(line))
         return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-    return json.dumps(redact(value), indent=2, sort_keys=True) + "\n"
+    return json.dumps(_diagnostic_value(value), indent=2, sort_keys=True) + "\n"
+
+
+def _diagnostic_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: (
+                "<omitted>"
+                if key in {"where", "variables", "invocation"}
+                else _diagnostic_value(child)
+            )
+            for key, child in redact(value).items()
+        }
+    if isinstance(value, list):
+        return [_diagnostic_value(child) for child in value]
+    return redact(value)

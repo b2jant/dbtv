@@ -27,6 +27,18 @@ def redact(value: Any, *, key: str | None = None) -> Any:
     if key is not None and is_secret_key(key):
         return REDACTED
     if isinstance(value, Mapping):
+        # These maps use dbt unique_ids as keys. A source called "tokens" is an
+        # identity, not a credential field; retain its public digest.
+        if key in {"snapshots", "source_scopes"} and all(
+            isinstance(child, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", child)
+            for child in value.values()
+        ):
+            return dict(value)
+        if key == "outputs":
+            return {
+                str(k): redact(v) if isinstance(v, Mapping) else redact(v, key=str(k))
+                for k, v in value.items()
+            }
         return {str(k): redact(v, key=str(k)) for k, v in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [redact(item) for item in value]
