@@ -22,6 +22,10 @@ The live Snowflake test is opt-in. Set the variables documented in
 uv run pytest tests/integration -v
 ```
 
+For persistent credentials on this computer, use the gitignored `.local/` directory
+and [local connector setup](local-connectors.md). Its command wrapper loads those
+settings only when explicitly invoked.
+
 Supported initial matrix: Python 3.11–3.13 (3.12 recommended), dbt-core 1.11.x,
 dbt-snowflake 1.11.x, dbt-duckdb 1.11.x, DuckDB 1.x, Snowflake Connector 3.12–4.x,
 and manifest schemas v9–v12. CI should test supported operating systems and pin the UV

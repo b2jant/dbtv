@@ -9,7 +9,7 @@ from typing import Any
 from dbtv.config.schema import ExtractionSettings, SourceSessionSettings
 from dbtv.connectors.snowflake.query import render_relation, render_select
 from dbtv.core.cancellation import CancellationToken
-from dbtv.core.errors import ExtractionError, SourceConnectionError
+from dbtv.core.errors import CancellationError, ExtractionError, SourceConnectionError
 from dbtv.core.hashing import sha256_value
 from dbtv.core.models import (
     CanonicalField,
@@ -168,7 +168,8 @@ class SnowflakeConnector:
             lambda: self.cancel(str(cursor.sfqid)) if cursor.sfqid else None
         )
         try:
-            for attempt in range(self.extraction.max_retries + 1):
+            attempt = 0
+            while True:
                 cancellation.raise_if_cancelled()
                 try:
                     statement_params = (
@@ -191,11 +192,12 @@ class SnowflakeConnector:
                         ) from exc
                     cancellation.raise_if_cancelled()
                     cancellation.wait(self.extraction.retry_base_seconds * (2**attempt))
+                    attempt += 1
             for table in cursor.fetch_arrow_batches():
                 cancellation.raise_if_cancelled()
                 for batch in table.to_batches(max_chunksize=self.extraction.arrow_batch_rows):
                     yield ExtractionBatch(batch, query_id=query_id)
-        except ExtractionError:
+        except (CancellationError, ExtractionError):
             raise
         except Exception as exc:
             raise ExtractionError(f"Arrow transfer failed for {request.source.unique_id}.") from exc

@@ -39,7 +39,10 @@ All items ranked 8–10 are implemented. The 5–7 items remain deferred as rank
 
 Verification on this host:
 
-- 77 tests passed; one opt-in live Snowflake test skipped.
+- 239 local tests passed with 99.44% statement coverage; one opt-in live Snowflake
+  test is skipped by default and passes separately with the saved local credentials.
+- Both Snowflake profiles authenticate. The six source fixtures and golden schema
+  grants are present; broader parity retesting remains pending.
 - Strict mypy passed for 48 source files; Ruff and `git diff --check` passed.
 - Wheel and source distribution built; the wheel passed an isolated DuckDB-only CLI smoke test
   and the complete cold/warm/edited/offline benchmark.

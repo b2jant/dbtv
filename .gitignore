@@ -10,3 +10,11 @@ build/
 dist/
 *.egg-info/
 
+# Machine-local connector credentials, profiles, fixtures, and reports.
+/.local/
+.env
+.env.*
+!.env.example
+*.p8
+*.pem
+*.key

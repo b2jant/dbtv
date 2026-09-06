@@ -6,9 +6,12 @@ run and a high coverage percentage do not establish that parity.
 
 ## Evidence available today
 
-`uv run pytest --cov=dbtv --cov-report=term-missing` reports **77 passed, 1 skipped,
-86% statement coverage** on macOS with Python 3.12.8. Ruff, strict mypy over 48
-source files, and the wheel/source build pass.
+The local regression suite reports **239 passed, 1 skipped, 99.44% statement
+coverage** on macOS with Python 3.12.8. Ruff, strict mypy over 48 source files,
+and the wheel/source build pass. The skipped test is opt-in: when invoked separately
+with the saved local Snowflake settings, it **passes against live Snowflake**.
+The full suite with `--cov-branch` measures **97.21% branch coverage** (941 of 968
+branches); statement and branch coverage are separate from warehouse result parity.
 
 | Layer | Existing evidence | Limit |
 |---|---|---|
@@ -17,17 +20,32 @@ source files, and the wheel/source build pass.
 | Local dbt execution | Fake-source extraction through snapshots and DuckDB into real dbt `run`, `test`, and `build`; local Parquet fixtures exercise replay and cohorts | Small synthetic projects, not a representative complex Snowflake graph |
 | Result comparison | Frozen-input replay, schema comparison, exact unordered row comparison with duplicate counts, intentional model-change detection | `dbtv compare` currently compares two captured local runs; it does not ingest a Snowflake dbt baseline |
 | Incremental validation | Isolated base build, incremental next-state build, and separate full rebuild; a regression fixture detects a missed update to an existing key | One two-state local scenario, not a Snowflake adapter strategy matrix |
-| Live Snowflake | One opt-in read-only extraction test requests at most 10 rows and checks query IDs | Not configured in this verification; no remote model execution or output comparison |
+| Live Snowflake | The opt-in read-only extraction test passes with key-pair authentication, requests at most 10 rows, and checks query IDs; both source and golden profiles authenticate, six fixture tables and golden schema grants were checked | This access verification does not rerun remote models or output comparisons |
+
+A previous sandbox campaign against revision `938ba0b` ran outside the repository:
+native Snowflake and local dbt builds each passed all 32 nodes, and 11 of 12
+materialized models matched. That run reported a three-hour timestamp divergence
+on 1,200 rows in `combined_activity` and an inspection failure for persisted views
+whose source catalog was detached. These are historical findings that still need
+revalidation against the current code; successful authentication does not resolve them.
+
+The temporary sandbox project and comparison script were not checked in and are no
+longer present on the development host. The service-user configuration was recovered,
+a replacement local key was registered, and live access was verified again. Persistent
+credentials now live in the ignored `.local/` directory; see
+[local connector setup](local-connectors.md). No account credentials or private keys
+belong in the repository's tracked files.
 
 The repository has no checked-in CI workflow. These checks were run locally;
 pushing a commit does not by itself make them a required merge or release gate.
-The broader golden tests described in the implementation plan remain engineering
-work, in addition to requiring an approved Snowflake test environment.
+Recovering or rebuilding the historical comparison harness as a repeatable checked-in
+suite and completing the broader campaign remain engineering work. Snowflake sandbox
+access is available on the configured development host.
 
 ## Required parity campaign
 
-The following is the validation design to implement and run, not a claim that a
-remote comparison harness already exists.
+The following is the validation design to implement and run as a maintained suite;
+the previous temporary comparison script is not available in this checkout.
 
 1. **Freeze identical inputs.** Use an immutable fixture or isolated frozen copy of
    every required source table. Both engines must read the same rows, including
@@ -106,3 +124,9 @@ uv run pytest tests/integration/test_snowflake_live.py -v -rs
 Check that the test passed rather than skipped. It is still only an extraction
 smoke test. See [local runtime workflows](local-runtime.md) for captured local
 results, replay, and incremental validation.
+
+On the configured development host, load the ignored settings explicitly:
+
+```bash
+bash scripts/with-local-env.sh uv run pytest tests/integration/test_snowflake_live.py -v -rs
+```

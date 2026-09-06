@@ -22,12 +22,14 @@ dbt selection -> dual manifests -> source policy -> connector/resolver plugins
 | Hardening | Fault, policy, offline, redaction, diagnostics, compatibility, contract, and full fake-connector E2E tests implemented. |
 | Packaging | Lockfile, sdist, and wheel build successfully with UV. |
 
-Current automated evidence, rechecked September 5, 2026: **77 tests pass, 1 opt-in live
-Snowflake test is skipped, 86% statement coverage**.
+Current automated evidence, rechecked September 5, 2026: **239 local tests pass,
+1 opt-in live Snowflake test is skipped by default, 99.44% statement coverage**.
+The live extraction test also passes when invoked separately with local credentials.
 Strict mypy checks all 48 source files, Ruff passes, and wheel/source distributions build.
-The built wheel starts in an isolated DuckDB-only environment. The local benchmark
-exercises cold, warm, edited, and offline runs; its report is linked below. These checks
-were run on the current macOS/Python 3.12 host, not on live Snowflake.
+The previously built wheel passed an isolated DuckDB-only startup check. The local
+benchmark exercises cold, warm, edited, and offline runs; its report is linked below.
+The host is macOS/Python 3.12. Live key-pair authentication now works for both the
+source and golden profiles, and the sandbox fixture tables and grants are present.
 
 The September local-runtime additions include connection-scoped cache identity,
 transactional dataset activation and recovery, named connections, key cohorts, actual
@@ -37,18 +39,20 @@ two-state incremental validation. See the [ranked checklist](local-runtime-roadm
 
 ## Remaining engineering and release gates
 
-The Snowflake-versus-DuckDB golden comparison harness and a checked-in CI workflow
-are not implemented. `dbtv compare` compares captured local runs, and the single live
-Snowflake test only checks bounded extraction. Complex warehouse result parity is
-therefore unverified. See [Snowflake correctness validation](snowflake-validation.md)
-for the current evidence and required validation campaign.
+A maintained Snowflake-versus-DuckDB comparison harness and checked-in CI workflow
+are still missing. An earlier temporary sandbox comparison matched 11 of 12 models
+and exposed timestamp divergence; that harness is no longer present on disk.
+`dbtv compare` compares captured local runs, and the checked-in live Snowflake test
+only checks bounded extraction. Complete parity on the current code is unverified.
+See [Snowflake correctness validation](snowflake-validation.md) for the historical
+findings, current access evidence, and required validation campaign.
 
 These parts of the plan require company systems or decisions and cannot be completed by
 repository code alone:
 
-- configure and run the opt-in extraction test, expand the live connector suite, and
-  implement and run golden comparisons against an approved Snowflake test account and
-  representative dbt project;
+- expand the live connector suite beyond the passing extraction test, restore a
+  repeatable golden comparison suite using the available sandbox, and validate a
+  representative company dbt project;
 - record remote, cold, warm, refresh, and offline performance on pilot hardware;
 - approve local-data tags, retention, encryption/device posture, and incident ownership;
 - sign and publish the internal package;
